@@ -27,29 +27,7 @@ NexusKB 适合用于：
 
 ## 架构概览
 
-```mermaid
-flowchart LR
-    U["用户"] --> F["Vue 前端"]
-    F --> A["FastAPI 问答服务"]
-    F --> D["Django 用户服务"]
-
-    D --> M1["MySQL 用户库"]
-    D --> R["Redis"]
-
-    A --> Auth["JWT 鉴权"]
-    Auth --> D
-    A --> Memory["会话记忆"]
-    Memory --> M2["MySQL 会话库"]
-    A --> Retriever["企业知识检索"]
-    Retriever --> C["ChromaDB 向量库"]
-    Retriever --> ReRank["Reranker 重排序"]
-    A --> LLM["LLM 生成"]
-
-    R --> A
-    ReRank --> A
-    LLM --> A
-    A --> F
-```
+![NexusKB 系统架构流程图](./docs/assets/system-architecture.png)
 
 ## 目录结构
 
