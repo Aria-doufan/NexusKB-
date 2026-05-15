@@ -236,21 +236,6 @@ backend/app/config/rag.yaml
 backend/scripts/
 ```
 
-## 不上传的内容
-
-为了保持仓库轻量和避免泄露本地信息，以下内容不会上传到 GitHub：
-
-- `.env`
-- 虚拟环境
-- `node_modules`
-- 前端构建产物
-- 日志文件
-- 数据库文件
-- Redis dump
-- ChromaDB 向量库
-- 原始数据集
-- 大模型权重
-- 个人文档和临时计划文档
 
 ## 未来方向
 
