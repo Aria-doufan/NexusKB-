@@ -1,400 +1,295 @@
-# 🚀 智能对话服务 (v1.1.0)
+# NexusKB
 
-## 📋 目录
+NexusKB 是一个面向企业知识库场景的 RAG 智能问答系统。项目围绕“企业内部文档如何被可靠检索、组织、重排并用于回答问题”展开，整合了 FastAPI 问答服务、Django 用户服务、Vue 前端、MySQL 会话存储、Redis 缓存和 Chroma 向量检索。
 
-- [项目简介](#项目简介)
-- [核心特性](#核心特性)
-- [快速开始](#快速开始)
-- [技术栈](#技术栈)
-- [项目结构](#项目结构)
-- [API 文档](#api-文档)
-- [配置说明](#配置说明)
-- [部署指南](#部署指南)
-- [开发指南](#开发指南)
-- [故障排除](#故障排除)
-- [文档](#文档)
-- [联系方式](#联系方式)
+与通用聊天应用不同，NexusKB 的重点不是单轮闲聊，而是企业文档问答链路：用户提出业务问题后，系统会从知识库中召回相关资料，结合会话上下文和重排序结果生成回答，并保留用户身份、会话历史和接口状态。
 
-## 项目简介
+## 项目定位
 
-这是一个基于 FastAPI + LangChain 构建的企业级智能对话系统，集成了先进的 RAG（检索增强生成）技术，能够基于文档内容提供高精度的智能问答服务。系统采用微服务架构，具备会话持久化、多语言支持和模块化设计等特性。
+NexusKB 适合用于：
 
-## 核心特性
+- 企业知识库问答
+- 内部制度、流程、产品资料检索
+- RAG 检索与重排序实验
+- 多服务 AI 应用课程设计或毕业设计
+- 智能客服、知识助手原型验证
 
-- **智能问答** 💬：基于 RAG 技术，结合文档检索和大语言模型，提供精准的问答体验
-- **会话持久化** 💾：使用 MySQL 存储会话历史，支持长期保存和回溯
-- **多语言支持** 🌐：前端集成 i18n，支持中英文界面切换
-- **文档管理** 📄：支持文档上传、处理和智能检索
-- **微服务架构** 🏗️：分离的用户服务和对话服务，易于扩展和维护
-- **高性能** ⚡：基于 FastAPI 和 ChromaDB，提供卓越的性能表现
+## 核心能力
 
-## 项目流程图
+- 企业知识问答：基于企业文档内容进行检索增强回答。
+- RAG 检索链路：支持文档解析、文本切分、向量化、ChromaDB 索引和相似度召回。
+- 检索结果重排序：支持本地 reranker 模型，对初步召回片段进行二次排序。
+- 会话记忆：使用 MySQL 持久化聊天历史，支持多轮对话上下文。
+- 用户体系：独立 Django 用户服务，提供注册、登录、JWT 鉴权、Token 刷新和用户信息接口。
+- 前端应用：Vue 3 前端提供登录、注册、聊天、会话、个人中心和设置页面。
+- 缓存与限流：Redis 用于用户信息缓存、Token 黑名单和接口限流。
+- 多模型接入：支持 DashScope 云端模型，也预留 Ollama、本地 embedding 和 reranker 模型配置。
+
+## 架构概览
 
 ```mermaid
-flowchart TD
-    subgraph "前端层"
-        A["用户界面
-        (Vue 3)"] -->|发送查询| B["API请求
-        (Axios)"]
-        C["会话管理
-        (Pinia)"] -->|状态管理| B
-        D["用户认证
-        (Vue Router)"] -->|路由守卫| B
-    end
+flowchart LR
+    U["用户"] --> F["Vue 前端"]
+    F --> A["FastAPI 问答服务"]
+    F --> D["Django 用户服务"]
 
-    subgraph "API路由层"
-        B -->|REST API| E["聊天路由
-        (FastAPI)"]
-        E -->|认证| F["认证中间件
-        (JWT)"]
-        E -->|限流| G["限流控制
-        (Redis)"]
-    end
+    D --> M1["MySQL 用户库"]
+    D --> R["Redis"]
 
-    subgraph "业务服务层"
-        E -->|代理查询| H["ChatService
-        (Python)"]
-        H -->|会话管理| I["SessionManager
-        (MySQL)"]
-        H -->|RAG检索| J["RagService
-        (LangChain)"]
-        H -->|向量存储| K["VectorStoreService
-        (ChromaDB)"]
-        H -->|智能代理| L["Agent
-        (LangChain)"]
-        H -->|文档重排序| M["ReorderService
-        (Hugging Face)"]
-    end
+    A --> Auth["JWT 鉴权"]
+    Auth --> D
+    A --> Memory["会话记忆"]
+    Memory --> M2["MySQL 会话库"]
+    A --> Retriever["企业知识检索"]
+    Retriever --> C["ChromaDB 向量库"]
+    Retriever --> ReRank["Reranker 重排序"]
+    A --> LLM["LLM 生成"]
 
-    subgraph "数据存储层"
-        I -->|存储会话| N["MySQL数据库"]
-        K -->|向量存储| O["ChromaDB向量库"]
-        K -->|文件存储| P["文件系统"]
-        G -->|缓存| Q["Redis缓存"]
-    end
-
-    subgraph "AI模型服务"
-        L -->|LLM调用| R["DashScope API
-        (Qwen3-Max)"]
-        J -->|嵌入模型| S["文本嵌入
-        (text-embedding-v4)"]
-        M -->|重排序模型| T["Qwen3-Reranker-0.6B
-        (PyTorch/Sentence-Transformers)"]
-    end
-
-    subgraph "用户服务"
-        U["Django用户服务"] -->|认证授权| F
-        U -->|用户管理| V["MySQL用户数据库"]
-    end
+    R --> A
+    ReRank --> A
+    LLM --> A
+    A --> F
 ```
 
-## 快速开始
+## 目录结构
 
-### 环境要求
+```text
+NexusKB/
+├── backend/                 # FastAPI RAG 问答服务
+│   ├── app/                 # 业务代码
+│   │   ├── agent/           # Agent 与路由图
+│   │   ├── cache/           # Redis 缓存封装
+│   │   ├── config/          # RAG、Chroma、Prompt 配置
+│   │   ├── db/              # MySQL / Redis 连接
+│   │   ├── models/          # 会话数据模型
+│   │   ├── rag/             # 检索、向量库、重排序
+│   │   ├── router/          # FastAPI 路由
+│   │   ├── services/        # 会话记忆等业务服务
+│   │   └── utils/           # 通用工具
+│   ├── scripts/             # 数据准备、索引构建和评测脚本
+│   ├── main.py              # FastAPI 入口
+│   └── requirements.txt
+├── DjangoUserService/       # Django 用户服务
+│   ├── apps/                # 用户、文件、工具模块
+│   ├── DjangoUserService/   # Django 项目配置
+│   ├── manage.py
+│   └── requirements.txt
+├── front/                   # Vue 3 前端
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.js
+├── docs/                    # 项目文档
+├── requirements.txt         # Python 聚合依赖
+└── .gitignore
+```
 
-#### 后端环境
+## 技术栈
+
+后端问答服务：
+
 - Python 3.12+
-- uv
+- FastAPI
+- Uvicorn
+- LangChain
+- LangGraph
+- ChromaDB
+- SQLAlchemy
+- aiomysql
+- Redis
+- DashScope
+- Ollama
+- sentence-transformers
+- ModelScope
+- PyTorch
+- unstructured
 
-#### 前端环境
+用户服务：
+
+- Python 3.10+
+- Django 5.2
+- Django REST Framework
+- Simple JWT
+- PyMySQL / mysqlclient
+- Celery
+- django-redis
+- drf-yasg
+
+前端：
+
+- Vue 3
+- Vite
+- Vue Router
+- Pinia
+- Vant
+- Axios
+- Vue I18n
+- marked
+- highlight.js
+- DOMPurify
+
+基础设施：
+
+- MySQL
+- Redis
+- ChromaDB
+- DashScope API
+- 可选本地模型服务
+
+## 安装环境
+
+建议准备：
+
+- Python 3.12+：运行 FastAPI 问答服务
+- Python 3.10+：运行 Django 用户服务
 - Node.js 16+
 - npm 或 pnpm
+- MySQL
+- Redis
+- Git
 
-### 克隆项目
+如果使用本地重排序模型，还需要准备 PyTorch 运行环境和足够的模型存储空间。
+
+## 安装依赖
+
+根目录提供了聚合依赖文件：
 
 ```bash
-git clone https://github.com/RMA-MUN/LangChain-RAG-FastAPI-Service.git
-cd LangChain-RAG-FastAPI-Service
+pip install -r requirements.txt
 ```
 
-### 安装依赖
+该文件会加载：
 
-#### 后端依赖
+```text
+-r backend/requirements.txt
+-r DjangoUserService/requirements.txt
+```
+
+也可以分别安装：
+
 ```bash
-# 进入后端目录
 cd backend
-
-# 使用 uv 安装依赖
-uv sync
+pip install -r requirements.txt
 ```
 
-#### 前端依赖
 ```bash
-# 进入前端目录
-cd front
+cd DjangoUserService
+pip install -r requirements.txt
+```
 
-# 安装依赖
+前端依赖：
+
+```bash
+cd front
 npm install
-# 或使用 pnpm
+```
+
+或：
+
+```bash
+cd front
 pnpm install
 ```
 
-### 环境配置
+## 环境变量
 
-#### 创建环境变量文件
-在 `backend` 目录下创建 `.env` 文件：
+FastAPI 服务：
 
-```env
-# DashScope API Key (必填)
-DASHSCOPE_API_KEY=your_dashscope_api_key
-
-# 数据库配置
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=your_password
-DB_NAME=chatbot
-
-# 安全配置
-SECRET_KEY=your_secret_key
-
-# 重排序模型配置（可选）
-RERANKER_MODEL_PATH=D:\Hugging_Face\models\Qwen3-Reranker-0.6B
+```bash
+cd backend
+copy .env.example .env
 ```
 
-### Hugging Face 模型配置
+需要配置 MySQL、Redis、JWT、DashScope 和 reranker 模型路径等参数。
 
-详细的模型下载和配置说明请参考：[Hugging Face 模型配置](./docs/huggingface_model.md)
+Django 用户服务：
 
-#### 模型配置
-修改 `backend/app/config/rag.yaml` 文件：
-
-```yaml
-# 聊天模型配置
-chat_model_name: qwen3-max
-
-# 文本嵌入模型配置
-text_embedding_model_name: text-embedding-v4
+```bash
+cd DjangoUserService
+copy .env.example .env
 ```
 
-#### 向量数据库配置
-修改 `backend/app/config/chroma.yaml` 文件：
+需要配置数据库、Redis 和 `SECRET_KEY`。FastAPI 与 Django 的 JWT 密钥应保持一致，否则 FastAPI 无法校验 Django 生成的 Token。
 
-```yaml
-# 向量数据库配置
-collection_name: rag_collection
-persist_directory: data/chromadb
-k: 3
+## 启动服务
 
-# 文件处理配置
-data_path: data
-md5_hex_store: data/md5_hex_store/md5_hex_store.txt
-allow_knowledge_file_types: ["txt", "pdf"]
+启动 MySQL 和 Redis 后，先启动用户服务：
 
-# 文档切分配置
-chunk_size: 200
-chunk_overlap: 20
-separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
+```bash
+cd DjangoUserService
+python manage.py migrate
+python manage.py runserver 8001
 ```
 
-### 启动服务
+启动 FastAPI 问答服务：
 
-#### 启动后端服务
 ```bash
 cd backend
 uvicorn main:app --reload
 ```
-服务将在 `http://localhost:8000` 运行。
 
-#### 启动前端服务
+启动前端：
+
 ```bash
 cd front
 npm run dev
-# 或使用 pnpm
-pnpm run dev
-```
-前端将在 `http://localhost:3000` 运行。
-
-#### 启动用户服务
-```bash
-# 进入 Django 用户服务目录
-cd DjangoUserService
-
-# 使用 uv 安装依赖
-uv sync
-
-# 启动 Django 服务
-uv run python manage.py runserver 8001
-```
-用户服务将在 `http://localhost:8001` 运行。
-
-#### 启动mysql服务
-
-```bash
-# 管理员运行cmd或powershell
-net start mysql
 ```
 
-#### 启动redis服务
+## 数据说明
 
-```bash
-# 如果你是直接解压安装的redis
-redis-server
+本项目使用企业知识库类数据进行 RAG 检索实验，重点关注企业文档、问题集、知识片段和检索评测结果。仓库不会直接提交原始数据、生成后的向量库或本地运行缓存。
 
-# 如果是服务版的redis，管理员打开终端
-net start redis
+本地运行时通常需要准备：
+
+- 企业知识文档
+- 问题集或评测集
+- ChromaDB 索引目录
+- 可选 reranker 模型权重
+
+相关配置位于：
+
+```text
+backend/app/config/chroma.yaml
+backend/app/config/rag.yaml
 ```
 
-#### 其他服务
+相关脚本位于：
 
-```bash
-# 如果使用ollama本地的模型，需要启动ollama服务
-ollama serve
+```text
+backend/scripts/
 ```
 
+## 不上传的内容
 
+为了保持仓库轻量和避免泄露本地信息，以下内容不会上传到 GitHub：
 
-## 技术栈
+- `.env`
+- 虚拟环境
+- `node_modules`
+- 前端构建产物
+- 日志文件
+- 数据库文件
+- Redis dump
+- ChromaDB 向量库
+- 原始数据集
+- 大模型权重
+- 个人文档和临时计划文档
 
-### 后端技术
-- **FastAPI** ⚡：高性能异步 Web 框架
-- **LangChain** 🦜：大语言模型应用开发框架
-- **ChromaDB** 📚：轻量级向量数据库，用于高效文档检索
-- **Django** 🎯：用户认证和管理系统
-- **MySQL** 🗄️：关系型数据库，用于存储用户数据和会话历史
-- **Redis** ⚡：缓存数据库，用于提高系统性能
-- **DashScope API** 🔑：提供大语言模型和嵌入模型服务
-- **Hugging Face** 🤗：提供预训练模型和模型下载服务
-- **PyTorch** 🧠：深度学习框架，用于模型推理
-- **Sentence-Transformers** 📝：句子嵌入和语义匹配库
+## 未来方向
 
-### 前端技术
-- **Vue 3** 🖼️：现代化前端框架
-- **Vite** ⚡：极速构建工具
-- **Vue Router** 🛣️：路由管理
-- **Pinia** 📦：状态管理
-- **i18n** 🌍：国际化支持
+- 优化企业知识库 chunk 策略。
+- 引入混合检索：关键词检索 + 向量检索。
+- 完善 reranker 评测指标。
+- 增加回答引用来源展示。
+- 增加知识库上传、索引状态和管理页面。
+- 增强会话记忆，从固定轮数升级为 token-aware 记忆。
+- 增加 Docker Compose 和 CI。
+- 增加权限分级和文件上传安全检查。
 
-## 项目结构
+## 更多文档
 
-```
-├── backend/                  # FastAPI 后端服务
-│   ├── app/                  # 应用代码
-│   │   ├── agent/            # 智能代理模块
-│   │   ├── config/           # 配置文件目录
-│   │   ├── model/            # 数据模型定义
-│   │   ├── prompt/           # 提示词模板
-│   │   ├── rag/              # RAG 核心功能
-│   │   ├── router/           # API 路由定义
-│   │   ├── services/         # 业务服务层
-│   │   └── utils/            # 工具函数
-│   ├── data/                 # 数据存储目录
-│   ├── main.py               # 应用入口文件
-│   └── requirements.txt      # 后端依赖列表
-├── front/                    # Vue 前端项目
-│   ├── src/                  # 源代码
-│   ├── public/               # 静态资源
-│   └── package.json          # 前端依赖配置
-├── DjangoUserService/        # Django 用户服务
-└── README.md                 # 项目说明文档
-```
-
-## API 文档
-
-### FastAPI 后端 API
-- **[API 文档](./backend/api.md)**：查看详细的 API 接口文档
-- **[交互式文档](http://localhost:8000/docs)**：启动服务后访问自动生成的交互式 API 文档
-
-### Django 用户服务 API
-- **[API 文档](./DjangoUserService/api.md)**：查看详细的用户服务 API 文档
-- **[交互式文档](http://localhost:8000/api/)**：启动服务后访问用户服务 API 文档
-
-## 配置说明
-
-### 数据库配置
-在 `backend/app/config/db_config.py` 中配置 MySQL 连接：
-
-```python
-# MySQL 配置
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "3306")),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "chatbot"),
-}
-```
-
-### API Key 配置
-在 `.env` 文件中设置 DashScope API Key：
-
-```env
-DASHSCOPE_API_KEY=your_dashscope_api_key
-```
-
-### 模型配置
-在 `backend/app/config/rag.yaml` 中配置模型参数：
-
-```yaml
-# 聊天模型名称
-chat_model_name: qwen3-max
-
-# 文本嵌入模型名称
-text_embedding_model_name: text-embedding-v4
-```
-
-### 向量数据库配置
-在 `backend/app/config/chroma.yaml` 中配置向量数据库参数：
-
-```yaml
-# 向量数据库配置
-collection_name: rag_collection
-persist_directory: data/chromadb
-k: 3
-
-# 文件处理配置
-data_path: data
-md5_hex_store: data/md5_hex_store/md5_hex_store.txt
-allow_knowledge_file_types: ["txt", "pdf"]
-
-# 文档切分配置
-chunk_size: 200
-chunk_overlap: 20
-separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
-```
-
-## 部署指南
-
-详细的部署说明请参考：[部署指南](./docs/deployment.md)
-
-## 开发指南
-
-### 代码结构说明
-- **backend/app/rag/**：RAG 核心功能，包括向量存储和检索
-- **backend/app/agent/**：智能代理，处理用户请求和对话逻辑
-- **backend/app/services/**：业务服务层，提供会话管理等功能
-- **backend/app/utils/**：工具函数，包括配置加载、文件处理等
-- **front/src/views/**：前端页面组件
-- **front/src/components/**：可复用的前端组件
-
-### 开发流程
-1. **添加新功能**
-   - 在对应的模块中添加代码
-   - 运行测试确保功能正常
-   - 更新相关文档
-2. **调试技巧**
-   - 使用 FastAPI 的自动重载功能：`uvicorn main:app --reload`
-   - 使用 Vue 的热更新功能：`npm run dev`
-
-## 故障排除
-
-详细的故障排除指南请参考：[故障排除](./docs/troubleshooting.md)
-
-## 文档
-
-项目文档位于 `docs/` 目录：
-
-- **[文档中心](./docs/README.md)**：项目文档总入口和维护规则
-- **[项目总览](./docs/PROJECT_OVERVIEW.md)**：项目定位、系统边界、目标架构
-- **[工作台账](./docs/WORKBOARD.md)**：已完成、进行中、下一步、关键决策和风险
-- **[模块设计索引](./docs/modules/README.md)**：后端、RAG、Router、记忆、前端与用户服务设计
-- **[企业 RAG 检索评测实验](./docs/experiments/enterprise_retrieval_eval.md)**：检索方案对比、指标和实验结论
-- **[部署指南](./docs/deployment.md)**：生产环境部署详细步骤
-- **[故障排除](./docs/troubleshooting.md)**：常见问题和解决方案
-- **[Hugging Face 模型配置](./docs/huggingface_model.md)**：模型下载和配置说明
-- **[FastAPI 后端 API](./backend/api.md)**：后端 API 接口文档
-- **[Django 用户服务 API](./DjangoUserService/api.md)**：用户服务 API 文档
-
-## 联系方式
-
-如有任何问题或建议，请随时联系我们。😊
+- [项目介绍](./docs/PROJECT_INTRO.md)
+- [部署说明](./docs/deployment.md)
+- [故障排除](./docs/troubleshooting.md)
+- [Hugging Face / ModelScope 模型配置](./docs/huggingface_model.md)
+- [FastAPI API 文档](./backend/api.md)
+- [Django 用户服务 API 文档](./DjangoUserService/api.md)
