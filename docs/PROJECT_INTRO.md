@@ -10,7 +10,6 @@
 - `DjangoUserService/`：用户服务，负责注册、登录、JWT 鉴权、用户信息和文件相关接口。
 - `front/`：Vue 前端应用，负责登录注册、聊天页面、会话列表、个人中心和设置页面。
 - `docs/`：项目说明、部署说明、模块设计和实验文档。
-- `images/`：项目展示截图。
 
 为了保持 GitHub 仓库轻量，仓库不上传虚拟环境、运行日志、数据库文件、向量库缓存、大模型权重和原始数据集。这些内容需要在本地运行时按需准备。
 
@@ -401,7 +400,7 @@ backend/scripts/download_qwen3_reranker_modelscope.py
 - `requirements.txt`
 - `package.json`
 - lock 文件
-- 项目截图和必要说明文档
+- 必要说明文档
 
 ## 10. 未来方向
 
