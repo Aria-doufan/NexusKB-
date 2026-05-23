@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 
 class QueryRequest(BaseModel):
@@ -45,6 +45,32 @@ class RouterResponse(BaseModel):
     response: str
     steps: Optional[List[dict]] = None
     error: Optional[str] = None
+
+
+class MemoryItemResponse(BaseModel):
+    """长期记忆条目响应模型"""
+    id: str
+    user_id: str
+    session_id: str
+    memory: str
+    memory_type: str
+    source: str = "chat"
+    source_message_ids: List[Any] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    score: float = 0.0
+    status: str = "active"
+
+
+class MemoryListResponse(BaseModel):
+    """长期记忆列表响应模型"""
+    memories: List[MemoryItemResponse] = Field(default_factory=list)
+
+
+class MemoryListSuccessResponse(BaseModel):
+    """长期记忆列表成功响应包裹模型"""
+    code: int
+    message: str
+    data: MemoryListResponse
 
 
 class RAGResponse(BaseModel):

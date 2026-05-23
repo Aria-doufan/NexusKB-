@@ -1,145 +1,191 @@
 # NexusKB
 
-NexusKB 是一个面向企业知识库场景的 RAG 智能问答系统。项目围绕“企业内部文档如何被可靠检索、组织、重排并用于回答问题”展开，整合了 FastAPI 问答服务、Django 用户服务、Vue 前端、MySQL 会话存储、Redis 缓存和 Chroma 向量检索。
+NexusKB 是一个面向企业知识库场景的 RAG 智能问答系统。项目由 FastAPI AI 后端、Django 用户服务、Vue 前端和文档/评测体系组成，核心目标是把企业文档、会话上下文和用户长期偏好组织成可检索、可追溯、可扩展的知识助手能力。
 
-与通用聊天应用不同，NexusKB 的重点不是单轮闲聊，而是企业文档问答链路：用户提出业务问题后，系统会从知识库中召回相关资料，结合会话上下文和重排序结果生成回答，并保留用户身份、会话历史和接口状态。
+它不是单纯的聊天 Demo，而是一套包含用户认证、会话记忆、企业知识检索、LangGraph 路由、向量数据库、重排序和前端交互的多服务 AI 应用框架。
 
 ## 项目定位
 
 NexusKB 适合用于：
 
-- 企业知识库问答
-- 内部制度、流程、产品资料检索
-- RAG 检索与重排序实验
-- 多服务 AI 应用课程设计或毕业设计
-- 智能客服、知识助手原型验证
+- 企业知识库问答与内部资料检索。
+- RAG、混合检索、reranker 和 Agent 路由实验。
+- 带用户体系和会话管理的 AI 助手原型。
+- 多服务 AI 应用课程设计、毕业设计或作品集项目。
+- 企业客服、知识助手、文档问答系统的工程验证。
 
 ## 核心能力
 
-- 企业知识问答：基于企业文档内容进行检索增强回答。
-- RAG 检索链路：支持文档解析、文本切分、向量化、ChromaDB 索引和相似度召回。
-- 检索结果重排序：支持本地 reranker 模型，对初步召回片段进行二次排序。
-- 会话记忆：使用 MySQL 持久化聊天历史，支持多轮对话上下文。
-- 用户体系：独立 Django 用户服务，提供注册、登录、JWT 鉴权、Token 刷新和用户信息接口。
-- 前端应用：Vue 3 前端提供登录、注册、聊天、会话、个人中心和设置页面。
-- 缓存与限流：Redis 用于用户信息缓存、Token 黑名单和接口限流。
-- 多模型接入：支持 DashScope 云端模型，也预留 Ollama、本地 embedding 和 reranker 模型配置。
+| 能力 | 说明 |
+| --- | --- |
+| 企业 RAG 问答 | 文档切分、向量化、Chroma 检索、BM25 混合召回、reranker 重排序和摘要生成。 |
+| LangGraph Router | 根据用户请求在普通聊天、企业知识库、工具调用、安全/澄清节点之间路由。 |
+| 会话记忆 | MySQL 保存会话历史，并用滚动摘要压缩较早上下文。 |
+| 长期记忆 | 用户偏好、项目背景等长期事实写入 MySQL，并同步 Chroma 做语义召回。 |
+| 用户体系 | Django 服务提供注册、登录、JWT、Token 刷新、用户信息和文件接口。 |
+| 前端应用 | Vue 3 前端提供登录、注册、聊天、会话、个人中心和设置页面。 |
+| 缓存与限流 | Redis 用于用户信息缓存、JWT 黑名单和 FastAPI 接口限流。 |
+| 评测与实验 | 脚本支持企业 RAG 检索评测、延迟统计和策略对比。 |
 
-## 架构概览
+## 总体架构
 
-![NexusKB 系统架构流程图](./docs/assets/system-architecture.png)
+```mermaid
+flowchart TB
+    User[用户 / 前端] --> Front[Vue 3 前端]
+    Front --> FastAPI[FastAPI AI 后端]
+    Front --> Django[Django 用户服务]
+
+    Django --> UserDB[(MySQL 用户数据)]
+    Django --> Redis[(Redis 缓存 / Token 黑名单)]
+
+    FastAPI --> Auth[JWT 鉴权]
+    Auth --> Django
+    FastAPI --> Router[LangGraph RouterGraph]
+
+    Router --> Chat[普通聊天链路]
+    Router --> EnterpriseRAG[企业知识库 RAG]
+    Router --> ToolAgent[工具调用 Agent]
+    Router --> Safety[安全 / 澄清节点]
+
+    Chat --> Memory[会话记忆 + 长期记忆]
+    ToolAgent --> Memory
+    EnterpriseRAG --> Retrieval[Chroma + BM25 + Reranker]
+
+    Memory --> ChatDB[(MySQL 会话/长期记忆)]
+    Memory --> MemoryVector[(Chroma 长期记忆索引)]
+    Retrieval --> DocVector[(Chroma 文档索引)]
+    Retrieval --> LLM[LLM / DeepSeek / DashScope / Ollama]
+    Chat --> LLM
+    ToolAgent --> LLM
+```
 
 ## 目录结构
 
 ```text
-NexusKB/
-├── backend/                 # FastAPI RAG 问答服务
-│   ├── app/                 # 业务代码
-│   │   ├── agent/           # Agent 与路由图
-│   │   ├── cache/           # Redis 缓存封装
-│   │   ├── config/          # RAG、Chroma、Prompt 配置
-│   │   ├── db/              # MySQL / Redis 连接
-│   │   ├── models/          # 会话数据模型
-│   │   ├── rag/             # 检索、向量库、重排序
-│   │   ├── router/          # FastAPI 路由
-│   │   ├── services/        # 会话记忆等业务服务
-│   │   └── utils/           # 通用工具
-│   ├── scripts/             # 数据准备、索引构建和评测脚本
-│   ├── main.py              # FastAPI 入口
+NexusKB-/
+├── backend/                         # FastAPI AI 后端
+│   ├── app/
+│   │   ├── agent/                   # LangChain Agent、LangGraph Router、工具调用
+│   │   ├── cache/                   # Redis 缓存封装
+│   │   ├── config/                  # RAG、Chroma、Prompt、Agent YAML 配置
+│   │   ├── core/                    # 统一响应、异常处理、限流、日志、性能记录
+│   │   ├── db/                      # MySQL / Redis 连接
+│   │   ├── models/                  # SQLAlchemy ORM 模型
+│   │   ├── prompt/                  # Prompt 模板
+│   │   ├── rag/                     # 文档入库、检索、重排序、企业 RAG 服务
+│   │   ├── router/                  # FastAPI 路由与业务服务
+│   │   ├── schemas/                 # Pydantic 请求/响应模型
+│   │   ├── services/                # 会话记忆、长期记忆、会话管理
+│   │   └── utils/                   # 配置、认证、文件、路径工具
+│   ├── scripts/                     # 索引构建、模型下载、评测脚本
+│   ├── tests/                       # 后端测试
+│   ├── main.py                      # FastAPI 入口
 │   └── requirements.txt
-├── DjangoUserService/       # Django 用户服务
-│   ├── apps/                # 用户、文件、工具模块
-│   ├── DjangoUserService/   # Django 项目配置
+├── DjangoUserService/               # Django 用户与文件服务
+│   ├── apps/                        # user / file / secret / utils 应用
+│   ├── DjangoUserService/           # Django 项目配置
 │   ├── manage.py
 │   └── requirements.txt
-├── front/                   # Vue 3 前端
-│   ├── src/
+├── front/                           # Vue 3 前端
+│   ├── src/                         # 页面、路由、Pinia store、i18n、API 配置
 │   ├── package.json
 │   └── vite.config.js
-├── docs/                    # 项目文档
-├── requirements.txt         # Python 聚合依赖
-└── .gitignore
+├── docs/                            # 项目说明、架构文档、模块设计、部署和实验记录
+├── requirements.txt                 # 聚合 Python 依赖
+└── .gitignore                       # 忽略环境、缓存、数据、个人文档等本地文件
 ```
+
+## 后端请求链路
+
+```text
+HTTP/SSE 请求
+  -> FastAPI router/chat.py
+  -> JWT 认证与限流
+  -> ChatService 或 RouterGraph
+  -> load_context：读取会话摘要、最近历史、长期记忆
+  -> llm_router：判断 route / rag_intent / source_hints
+  -> validate_decision：校验路由输出
+  -> chat / enterprise_knowledge / tool_action / unsafe_or_system / clarify
+  -> persist_message：写入会话历史、更新会话记忆、抽取长期记忆
+  -> JSON 或 SSE 响应
+```
+
+## 记忆体系
+
+NexusKB 当前采用三层记忆：
+
+1. **Working Memory**：最近几轮原文，保证当前对话连贯。
+2. **Session Memory**：当前会话较早历史的滚动摘要，降低上下文长度。
+3. **Long-term Memory**：跨会话长期事实，例如用户偏好、项目背景、稳定约束。MySQL 是权威存储，Chroma 是语义召回索引。
+
+长期记忆通过 `user_id` 和 `status=active` 做用户隔离。删除记忆时会先软删除 MySQL 记录，再尽力删除 Chroma 向量；即使向量删除失败，语义去重也会回查 MySQL，避免已删除记忆继续影响后续写入。
+
+## 主要 API
+
+| 接口 | 方法 | 用途 |
+| --- | --- | --- |
+| `/api/agent/query/stream` | POST | RouterGraph SSE 流式问答。 |
+| `/api/agent/router/query` | POST | RouterGraph 非流式问答。 |
+| `/api/rag/query` | POST | RAG 检索摘要。 |
+| `/api/session/{session_id}` | GET / DELETE | 获取或删除当前用户会话。 |
+| `/api/sessions/{user_id}` | GET | 获取当前用户会话列表，强制只能查自己。 |
+| `/api/memories` | GET | 获取当前用户长期记忆。 |
+| `/api/memories/{memory_id}` | DELETE | 删除当前用户长期记忆。 |
+| `/api/vector/add/single` | POST | 上传单个文档入向量库。 |
+| `/api/vector/add/multiple` | POST | 上传多个文档入向量库。 |
+| `/api/vector/clean` | DELETE | 清空当前用户上传文档向量。 |
+| `/api/reorder` | POST | 对候选文档重排序。 |
+
+详细接口见 [backend/api.md](./backend/api.md)。
 
 ## 技术栈
 
-后端问答服务：
+### FastAPI AI 后端
 
-- Python 3.12+
-- FastAPI
-- Uvicorn
-- LangChain
-- LangGraph
-- ChromaDB
-- SQLAlchemy
-- aiomysql
+- Python 3.11/3.12
+- FastAPI / Starlette / Uvicorn
+- LangChain / LangGraph
+- Chroma / langchain-chroma
+- SQLAlchemy / aiomysql
 - Redis
-- DashScope
-- Ollama
-- sentence-transformers
-- ModelScope
-- PyTorch
-- unstructured
+- DeepSeek / DashScope / Ollama 兼容模型
+- sentence-transformers / PyTorch reranker
+- unstructured / pypdf / python-magic
 
-用户服务：
+### Django 用户服务
 
-- Python 3.10+
-- Django 5.2
-- Django REST Framework
+- Django / Django REST Framework
 - Simple JWT
-- PyMySQL / mysqlclient
-- Celery
-- django-redis
+- MySQL
+- Redis / Celery
 - drf-yasg
 
-前端：
+### Vue 前端
 
-- Vue 3
-- Vite
+- Vue 3 / Vite
 - Vue Router
 - Pinia
 - Vant
 - Axios
 - Vue I18n
-- marked
-- highlight.js
-- DOMPurify
+- marked / highlight.js / DOMPurify
 
-基础设施：
+## 本地运行
+
+### 1. 准备基础服务
+
+需要提前启动：
 
 - MySQL
 - Redis
-- ChromaDB
-- DashScope API
-- 可选本地模型服务
+- 可选：Ollama、Chroma 持久化目录、本地 reranker 模型
 
-## 安装环境
+### 2. 安装 Python 依赖
 
-建议准备：
-
-- Python 3.12+：运行 FastAPI 问答服务
-- Python 3.10+：运行 Django 用户服务
-- Node.js 16+
-- npm 或 pnpm
-- MySQL
-- Redis
-- Git
-
-如果使用本地重排序模型，还需要准备 PyTorch 运行环境和足够的模型存储空间。
-
-## 安装依赖
-
-根目录提供了聚合依赖文件：
+项目可以使用聚合依赖：
 
 ```bash
 pip install -r requirements.txt
-```
-
-该文件会加载：
-
-```text
--r backend/requirements.txt
--r DjangoUserService/requirements.txt
 ```
 
 也可以分别安装：
@@ -154,43 +200,27 @@ cd DjangoUserService
 pip install -r requirements.txt
 ```
 
-前端依赖：
+Windows 下如果使用 `python-magic`，需要确保 `python-magic-bin` 安装成功，并且 `libmagic.dll` 所在目录能被当前环境找到。
 
-```bash
-cd front
-npm install
-```
+### 3. 配置环境变量
 
-或：
-
-```bash
-cd front
-pnpm install
-```
-
-## 环境变量
-
-FastAPI 服务：
+复制示例文件，不要提交真实 `.env`：
 
 ```bash
 cd backend
 copy .env.example .env
 ```
 
-需要配置 MySQL、Redis、JWT、DashScope 和 reranker 模型路径等参数。
-
-Django 用户服务：
-
 ```bash
 cd DjangoUserService
 copy .env.example .env
 ```
 
-需要配置数据库、Redis 和 `SECRET_KEY`。FastAPI 与 Django 的 JWT 密钥应保持一致，否则 FastAPI 无法校验 Django 生成的 Token。
+FastAPI 和 Django 的 JWT 相关密钥需要保持一致，否则 FastAPI 无法校验 Django 生成的 Token。
 
-## 启动服务
+### 4. 启动服务
 
-启动 MySQL 和 Redis 后，先启动用户服务：
+Django 用户服务：
 
 ```bash
 cd DjangoUserService
@@ -198,76 +228,66 @@ python manage.py migrate
 python manage.py runserver 8001
 ```
 
-启动 FastAPI 问答服务：
+FastAPI AI 后端：
 
 ```bash
 cd backend
 uvicorn main:app --reload
 ```
 
-启动前端：
+Vue 前端：
 
 ```bash
 cd front
+npm install
 npm run dev
 ```
 
-## 数据说明
+## 验证命令
 
-本项目使用企业知识库类数据进行 RAG 检索实验，重点关注企业文档、问题集、知识片段和检索评测结果。仓库不会直接提交原始数据、生成后的向量库或本地运行缓存。
+长期记忆与 RouterGraph 相关单测：
 
-本地运行时通常需要准备：
-
-- 企业知识文档
-- 问题集或评测集
-- ChromaDB 索引目录
-- 可选 reranker 模型权重
-
-相关配置位于：
-
-```text
-backend/app/config/chroma.yaml
-backend/app/config/rag.yaml
+```bash
+PYTHONPATH=backend pytest backend/tests/test_long_term_memory_unit.py -q
 ```
 
-相关脚本位于：
+语法编译检查：
 
-```text
-backend/scripts/
+```bash
+python -m compileall backend/app
 ```
 
-## 不上传的内容
+完整 FastAPI app 导入检查：
 
-为了保持仓库轻量和避免泄露本地信息，以下内容不会上传到 GitHub：
+```bash
+PYTHONPATH=backend DEEPSEEK_API_KEY=test python -c "import main; print('IMPORT_OK')"
+```
 
-- `.env`
-- 虚拟环境
-- `node_modules`
-- 前端构建产物
-- 日志文件
-- 数据库文件
-- Redis dump
-- ChromaDB 向量库
-- 原始数据集
-- 大模型权重
-- 个人文档和临时计划文档
+## GitHub 提交安全规则
 
-## 未来方向
+不要提交以下内容：
 
-- 优化企业知识库 chunk 策略。
-- 引入混合检索：关键词检索 + 向量检索。
-- 完善 reranker 评测指标。
-- 增加回答引用来源展示。
-- 增加知识库上传、索引状态和管理页面。
-- 增强会话记忆，从固定轮数升级为 token-aware 记忆。
-- 增加 Docker Compose 和 CI。
-- 增加权限分级和文件上传安全检查。
+- `.env`、`.env.local`、生产密钥、JWT 密钥、数据库密码、API Key。
+- 虚拟环境、Conda 环境、`node_modules`、构建产物。
+- 日志、缓存、数据库文件、Redis dump、Chroma 向量库目录。
+- 原始企业数据、评测私有数据、大模型权重。
+- 简历、PDF 简历、个人材料、临时面试材料或本地规划草稿。
 
-## 更多文档
+仓库只保留源码、可公开说明文档、示例环境变量文件和可复现脚本。
 
-- [项目介绍](./docs/PROJECT_INTRO.md)
-- [部署说明](./docs/deployment.md)
-- [故障排除](./docs/troubleshooting.md)
-- [Hugging Face / ModelScope 模型配置](./docs/huggingface_model.md)
-- [FastAPI API 文档](./backend/api.md)
-- [Django 用户服务 API 文档](./DjangoUserService/api.md)
+## 文档入口
+
+- [docs/README.md](./docs/README.md)：文档中心。
+- [docs/PROJECT_OVERVIEW.md](./docs/PROJECT_OVERVIEW.md)：项目大纲与系统边界。
+- [docs/modules/README.md](./docs/modules/README.md)：模块设计索引。
+- [backend/BACKEND_SUMMARY.md](./backend/BACKEND_SUMMARY.md)：后端架构总结。
+- [backend/api.md](./backend/api.md)：FastAPI 接口文档。
+- [DjangoUserService/api.md](./DjangoUserService/api.md)：用户服务接口文档。
+
+## 后续方向
+
+- 完善端到端集成测试和容器化启动脚本。
+- 将 API 文档从 OpenAPI 自动生成并同步到 Markdown。
+- 扩展长期记忆的用户可编辑、冲突处理和审计能力。
+- 优化企业 RAG 的 chunk 策略、召回融合和 reranker 延迟。
+- 增强前端对引用来源、记忆管理和知识库上传状态的展示。

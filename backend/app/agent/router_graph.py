@@ -16,6 +16,7 @@ from app.core.perf import log_perf, perf_counter
 from app.rag.enterprise_rag_service import enterprise_rag_service
 from app.services import session_manager as sm
 from app.services.conversation_memory import conversation_memory_service
+from app.services.long_term_memory import long_term_memory_service
 
 
 Route = Literal["enterprise_knowledge", "tool_action", "chat", "unsafe_or_system", "clarify"]
@@ -91,6 +92,7 @@ class GraphState(TypedDict):
     memory_summary: NotRequired[str]
     memory_compressed_turns: NotRequired[int]
     memory_total_turns: NotRequired[int]
+    long_term_memories: NotRequired[list[dict[str, Any]]]
     route: NotRequired[str]
     rag_intent: NotRequired[str]
     source_hints: NotRequired[list[str]]
@@ -218,6 +220,7 @@ class RouterGraph:
             "memory_summary": "",
             "memory_compressed_turns": 0,
             "memory_total_turns": 0,
+            "long_term_memories": [],
             "route": "chat",
             "rag_intent": "unknown",
             "source_hints": [],
@@ -264,6 +267,7 @@ class RouterGraph:
             "memory_summary": "",
             "memory_compressed_turns": 0,
             "memory_total_turns": 0,
+            "long_term_memories": [],
             "route": "chat",
             "rag_intent": "unknown",
             "source_hints": [],
@@ -321,6 +325,7 @@ class RouterGraph:
                         state["session_id"],
                         user_id,
                         history=state.get("history", []),
+                        long_term_memories=state.get("long_term_memories", []),
                     ):
                         yield event
                 finally:
@@ -335,6 +340,7 @@ class RouterGraph:
                         user_id,
                         tool_profile="full",
                         history=state.get("history", []),
+                        long_term_memories=state.get("long_term_memories", []),
                     ):
                         yield event
                 finally:
@@ -381,6 +387,7 @@ class RouterGraph:
         memory_summary = ""
         memory_compressed_turns = 0
         memory_total_turns = 0
+        long_term_memories: list[dict[str, Any]] = []
 
         try:
             memory_context = await conversation_memory_service.get_memory_context(session_id, user_id)
@@ -397,12 +404,19 @@ class RouterGraph:
             except Exception as history_exc:
                 logger.warning(f"【RouterGraph】加载完整历史失败: {history_exc}")
 
+        try:
+            memory_items = await long_term_memory_service.search(state["query"], user_id)
+            long_term_memories = [item.to_dict() for item in memory_items]
+        except Exception as exc:
+            logger.warning(f"【RouterGraph】加载长期记忆失败: {exc}")
+
         return {
             "session_id": session_id,
             "history": history,
             "memory_summary": memory_summary,
             "memory_compressed_turns": memory_compressed_turns,
             "memory_total_turns": memory_total_turns,
+            "long_term_memories": long_term_memories,
         }
 
     async def llm_router(self, state: GraphState) -> dict[str, Any]:
@@ -514,7 +528,11 @@ class RouterGraph:
 
     async def chat_node(self, state: GraphState) -> dict[str, Any]:
         try:
-            result = await get_chat_response(state["query"], state.get("history", []))
+            result = await get_chat_response(
+                state["query"],
+                state.get("history", []),
+                long_term_memories=state.get("long_term_memories", []),
+            )
             return {
                 "answer": result.get("response", "抱歉，处理对话时出现了错误。"),
                 "steps": result.get("steps", []),
@@ -539,6 +557,7 @@ class RouterGraph:
         if not answer or state.get("error"):
             return {}
 
+        persisted = False
         try:
             if sm.session_manager is not None:
                 await sm.session_manager.add_message(
@@ -551,8 +570,22 @@ class RouterGraph:
                     state["session_id"],
                     state["user_id"],
                 )
+                persisted = True
         except Exception as exc:
             logger.warning(f"【RouterGraph】写入会话历史失败: {exc}")
+
+        if persisted:
+            try:
+                await long_term_memory_service.extract_and_store(
+                    user_id=state["user_id"],
+                    session_id=state["session_id"],
+                    user_message=state["query"],
+                    assistant_message=answer,
+                    source="chat",
+                )
+            except Exception as exc:
+                logger.warning(f"【RouterGraph】抽取长期记忆失败: {exc}")
+
         return {}
 
     async def format_response(self, state: GraphState) -> dict[str, Any]:
@@ -569,6 +602,7 @@ class RouterGraph:
                 state["query"],
                 state.get("history", []),
                 tool_profile=tool_profile,
+                long_term_memories=state.get("long_term_memories", []),
             )
             return {
                 "answer": result.get("response", fallback_answer),

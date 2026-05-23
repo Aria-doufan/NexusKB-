@@ -2,7 +2,7 @@ from typing import List
 import uuid
 
 from fastapi.routing import APIRouter
-from fastapi import UploadFile, File, Depends
+from fastapi import UploadFile, File, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from app.agent.router_graph import router_graph
@@ -14,6 +14,8 @@ from app.schemas.models import (
     RAGRequest,
     RouterResponse,
     SessionResponse,
+    MemoryListResponse,
+    MemoryListSuccessResponse,
     ReorderResponse,
     ReorderRequest,
 )
@@ -81,6 +83,31 @@ async def delete_session(session_id: str, user_id: str = Depends(get_current_use
     """删除会话"""
     await router_service.handle_delete_session(session_id, user_id)
     return success_response(message=f"Session {session_id} deleted successfully")
+
+
+@chat_router.get("/memories", response_model=MemoryListSuccessResponse)
+async def list_memories(
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+        user_id: str = Depends(get_current_user_id),
+        router_service: ChatService = Depends(get_router_service),
+        _: None = Depends(rate_limit(limit=20, window=60))
+):
+    """获取当前用户长期记忆"""
+    memories = await router_service.handle_list_memories(user_id, limit=limit, offset=offset)
+    return success_response(data=MemoryListResponse(memories=memories))
+
+
+@chat_router.delete("/memories/{memory_id}")
+async def delete_memory(
+        memory_id: str,
+        user_id: str = Depends(get_current_user_id),
+        router_service: ChatService = Depends(get_router_service),
+        _: None = Depends(rate_limit(limit=20, window=60))
+):
+    """删除当前用户长期记忆"""
+    await router_service.handle_delete_memory(memory_id, user_id)
+    return success_response(message=f"Memory {memory_id} deleted successfully")
 
 @chat_router.get("/sessions")
 async def get_all_sessions(router_service: ChatService = Depends(get_router_service)):

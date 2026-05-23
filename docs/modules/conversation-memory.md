@@ -4,14 +4,15 @@
 
 当前会话历史通过 MySQL 的 `chat_sessions` 和 `chat_messages` 保存，调用 Agent 或 Router 时直接读取完整历史。随着会话轮数增加，完整历史会带来上下文变长、成本升高、延迟增加和早期关键信息丢失等问题。
 
-本阶段先实现两层记忆结构：
+当前记忆体系分为三层：
 
 ```text
 Working Memory：最近 N 轮原文
 Session Memory：更早历史的滚动摘要
+Long-term Memory：跨 session 的用户偏好、长期事实和稳定约束
 ```
 
-三层记忆中的 Long-term Memory 暂不实现，只在后续扩展中预留。
+本文重点说明 Working Memory 与 Session Memory；Long-term Memory 的 MySQL + Chroma 语义召回设计见 [长期记忆模块设计](./long-term-memory.md)。
 
 ## 目标
 
@@ -185,8 +186,9 @@ class ConversationMemoryService:
 ### 后续扩展
 
 - [ ] 引入 token 估算，替代纯轮数阈值。
-- [ ] 增加 Long-term Memory 表。
-- [ ] 增加记忆删除、修正和冲突处理。
+- [x] 增加 Long-term Memory 表。
+- [x] 增加长期记忆列表和删除 API。
+- [ ] 增加记忆修正、合并和冲突处理。
 
 ## 更新记录
 

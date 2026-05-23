@@ -122,7 +122,13 @@ DSagent/logs/
 # Personal documents and planning notes
 *.docx
 *简历*
-胡成艺_项目设计与简历优化说明.md
+*resume*
+*Resume*
+review_resume*
+review_resume_pages/
+*项目设计与简历优化说明.md
+*个人说明*
+*面试材料*
 docs/archive/
 docs/*PLAN*.md
 docs/WORKBOARD.md

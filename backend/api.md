@@ -212,43 +212,7 @@ Authorization: Bearer your-jwt-token
 }
 ```
 
-#### 3.3.3 获取所有会话ID
-
-**GET /api/sessions**
-
-功能：获取系统中所有会话的ID。
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["会话ID1", "会话ID2", "会话ID3"]
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/api/sessions
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"]
-  }
-}
-```
-
-#### 3.3.4 获取用户所有会话ID
+#### 3.3.3 获取用户所有会话ID
 
 **GET /api/sessions/{user\_id}**
 
@@ -291,9 +255,87 @@ Authorization: Bearer your-jwt-token
 }
 ```
 
-### 3.4 向量数据库接口
+### 3.4 长期记忆接口
 
-#### 3.4.1 上传单个文件
+长期记忆接口只操作当前 JWT 用户自己的记忆，不接受外部传入 `user_id`。
+
+#### 3.4.1 获取当前用户长期记忆
+
+**GET /api/memories**
+
+功能：获取当前登录用户的长期记忆列表。
+
+**Query 参数**：
+
+| 参数名 | 类型 | 必填 | 默认值 | 限制 | 描述 |
+| --- | --- | --- | --- | --- | --- |
+| limit | int | 否 | 50 | 1-100 | 返回条数 |
+| offset | int | 否 | 0 | >= 0 | 分页偏移 |
+
+**请求头**：
+
+| 参数名 | 类型 | 必填 | 描述 |
+| --- | --- | --- | --- |
+| Authorization | string | 是 | Bearer {jwt-token} |
+
+**响应格式**：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "memories": [
+      {
+        "id": "memory-id",
+        "user_id": "current-user-id",
+        "session_id": "session-id",
+        "memory": "用户偏好回答简洁直接。",
+        "memory_type": "preference",
+        "source": "chat",
+        "source_message_ids": [],
+        "metadata": {},
+        "score": 0.95,
+        "status": "active"
+      }
+    ]
+  }
+}
+```
+
+#### 3.4.2 删除当前用户长期记忆
+
+**DELETE /api/memories/{memory_id}**
+
+功能：删除当前登录用户的一条长期记忆。删除采用 MySQL 软删除，并尽力删除对应 Chroma 向量。
+
+**路径参数**：
+
+| 参数名 | 类型 | 必填 | 描述 |
+| --- | --- | --- | --- |
+| memory_id | string | 是 | 长期记忆 ID |
+
+**请求头**：
+
+| 参数名 | 类型 | 必填 | 描述 |
+| --- | --- | --- | --- |
+| Authorization | string | 是 | Bearer {jwt-token} |
+
+**响应格式**：
+
+```json
+{
+  "code": 200,
+  "message": "Memory {memory_id} deleted successfully",
+  "data": null
+}
+```
+
+如果记忆不存在或不属于当前用户，返回 `404 Memory not found`。
+
+### 3.5 向量数据库接口
+
+#### 3.5.1 上传单个文件
 
 **POST /api/vector/add/single**
 
@@ -341,7 +383,7 @@ file: [选择文件]
 - 文件大小不能超过20MB
 - 仅支持PDF和TXT文件
 
-#### 3.4.2 上传多个文件
+#### 3.5.2 上传多个文件
 
 **POST /api/vector/add/multiple**
 
@@ -389,7 +431,7 @@ files: [选择多个文件]
 - 文件总大小不能超过200MB
 - 仅支持PDF和TXT文件
 
-#### 3.4.3 清空用户向量
+#### 3.5.3 清空用户向量
 
 **DELETE /api/vector/clean**
 
@@ -428,9 +470,9 @@ Authorization: Bearer your-jwt-token
 }
 ```
 
-### 3.5 文档重排序接口
+### 3.6 文档重排序接口
 
-#### 3.5.1 文档中文重排序
+#### 3.6.1 文档中文重排序
 
 **POST /api/reorder**
 
@@ -672,17 +714,13 @@ Authorization: Bearer your-jwt-token
 ### 500 Internal Server Error
 
 - 原因：服务器内部错误
+- 生产环境响应不应暴露 traceback、数据库信息、密钥、内部路径或详细异常堆栈。
 - 响应格式：
   ```json
   {
     "code": 500,
     "message": "服务器内部错误",
-    "data": {
-      "error_type": "ErrorType",
-      "error_detail": "错误详情",
-      "traceback": "堆栈跟踪信息",
-      "path": "/api/endpoint"
-    }
+    "data": null
   }
   ```
 

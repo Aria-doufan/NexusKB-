@@ -17,6 +17,7 @@ from app.core.logger_handler import logger
 from app.core.perf import log_perf, perf_counter
 from app.services import session_manager as sm
 from app.services.conversation_memory import conversation_memory_service
+from app.services.long_term_memory import long_term_memory_service
 from app.utils.prompt_loader import load_prompt
 
 
@@ -36,6 +37,8 @@ PURE_CHAT_SYSTEM_PROMPT = """你是一个稳定、克制、自然的聊天助手
 SAFE_UTILITY_CONTEXT_TEMPLATE = """安全工具结果：
 {tool_result}
 """
+
+LONG_TERM_MEMORY_CONTEXT_HEADER = """以下是与当前用户相关、可能有助于回答的长期记忆。它们不是当前对话原文，而是系统从历史交互中抽取的事实。若与用户当前表达冲突，以用户当前表达为准。"""
 
 
 class AgentFactory:
@@ -188,6 +191,44 @@ def _build_chat_history(history: Optional[List[tuple]]) -> List[BaseMessage]:
     return chat_history
 
 
+def _sanitize_memory_context_value(value: object) -> str:
+    text = str(value or "").strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _sanitize_memory_type(value: object) -> str:
+    text = _sanitize_memory_context_value(value)
+    safe_text = re.sub(r"[^0-9A-Za-z_\-一-鿿]", "_", text)
+    return safe_text or "other"
+
+
+def _format_long_term_memory_context(memories: Optional[List[dict]]) -> str:
+    if not memories:
+        return ""
+
+    lines = [LONG_TERM_MEMORY_CONTEXT_HEADER, ""]
+    visible_index = 1
+    for item in memories:
+        memory = _sanitize_memory_context_value(item.get("memory"))
+        if not memory:
+            continue
+        memory_type = _sanitize_memory_type(item.get("memory_type"))
+        lines.append(f"{visible_index}. [{memory_type}] {memory}")
+        visible_index += 1
+
+    return "\n".join(lines).strip() if len(lines) > 2 else ""
+
+
+def _build_system_prompt_with_long_term_memory(
+    system_prompt: str,
+    long_term_memories: Optional[List[dict]] = None,
+) -> str:
+    memory_context = _format_long_term_memory_context(long_term_memories)
+    if not memory_context:
+        return system_prompt
+    return f"{system_prompt}\n\n{memory_context}"
+
+
 def _extract_weather_city(query: str) -> Optional[str]:
     cleaned = query.strip()
     if not re.search(r"天气|weather", cleaned, flags=re.IGNORECASE):
@@ -220,6 +261,7 @@ async def get_agent_response(
         history: Optional[List[tuple]] = None,
         custom_tools: Optional[List[BaseTool]] = None,
         tool_profile: ToolProfile = "full",
+        long_term_memories: Optional[List[dict]] = None,
         **kwargs
 ):
     """
@@ -253,7 +295,10 @@ async def get_agent_response(
         async for chunk in agent_executor.astream({
             "input": query,
             "chat_history": chat_history,
-            "system_prompt": agent_factory.default_system_prompt
+            "system_prompt": _build_system_prompt_with_long_term_memory(
+                agent_factory.default_system_prompt,
+                long_term_memories,
+            )
         }):
             if "output" in chunk:
                 full_response.append(chunk["output"])
@@ -290,6 +335,7 @@ async def get_chat_response(
         history: Optional[List[tuple]] = None,
         custom_model: Optional[str] = None,
         custom_system_prompt: Optional[str] = None,
+        long_term_memories: Optional[List[dict]] = None,
 ):
     """
     获取纯聊天响应。
@@ -303,7 +349,10 @@ async def get_chat_response(
         response = await chain.ainvoke({
             "input": query,
             "chat_history": chat_history,
-            "system_prompt": custom_system_prompt or PURE_CHAT_SYSTEM_PROMPT,
+            "system_prompt": _build_system_prompt_with_long_term_memory(
+                custom_system_prompt or PURE_CHAT_SYSTEM_PROMPT,
+                long_term_memories,
+            ),
             "safe_utility_context": safe_utility_context,
         })
 
@@ -326,6 +375,7 @@ async def get_chat_stream_response(
         history: Optional[List[tuple]] = None,
         custom_model: Optional[str] = None,
         custom_system_prompt: Optional[str] = None,
+        long_term_memories: Optional[List[dict]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     获取纯聊天流式响应。
@@ -355,7 +405,10 @@ async def get_chat_stream_response(
         async for chunk in chain.astream({
             "input": query,
             "chat_history": chat_history,
-            "system_prompt": custom_system_prompt or PURE_CHAT_SYSTEM_PROMPT,
+            "system_prompt": _build_system_prompt_with_long_term_memory(
+                custom_system_prompt or PURE_CHAT_SYSTEM_PROMPT,
+                long_term_memories,
+            ),
             "safe_utility_context": safe_utility_context,
         }):
             if not chunk:
@@ -384,6 +437,17 @@ async def get_chat_stream_response(
         log_perf("pure_chat.persist_and_memory", step_start, session_id=session_id, user_id=user_id)
         logger.info("【PureChat流式响应】添加到会话历史成功")
 
+        try:
+            await long_term_memory_service.extract_and_store(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=query,
+                assistant_message=response,
+                source="chat",
+            )
+        except Exception as exc:
+            logger.warning(f"【PureChat流式响应】抽取长期记忆失败: {exc}")
+
         yield f"data: {json.dumps({'type': 'done', 'session_id': session_id}, ensure_ascii=False)}\n\n"
         log_perf("pure_chat.stream_total", request_start, session_id=session_id, user_id=user_id)
         logger.info(f"【PureChat流式响应】处理完成，会话ID: {session_id}")
@@ -401,6 +465,7 @@ async def get_agent_stream_response(
         custom_tools: Optional[List[BaseTool]] = None,
         tool_profile: ToolProfile = "full",
         history: Optional[List[tuple]] = None,
+        long_term_memories: Optional[List[dict]] = None,
         **kwargs
 ) -> AsyncGenerator[str, None]:
     """
@@ -452,7 +517,10 @@ async def get_agent_stream_response(
         async for chunk in agent_executor.astream({
             "input": query,
             "chat_history": chat_history,
-            "system_prompt": agent_factory.default_system_prompt
+            "system_prompt": _build_system_prompt_with_long_term_memory(
+                agent_factory.default_system_prompt,
+                long_term_memories,
+            )
         }):
             if "output" in chunk:
                 chunk_content = chunk["output"]
@@ -495,6 +563,17 @@ async def get_agent_stream_response(
         await conversation_memory_service.update_memory(session_id, user_id)
         log_perf("tool_agent.persist_and_memory", step_start, session_id=session_id, user_id=user_id)
         logger.info(f"【Agent流式响应】添加到会话历史成功")
+
+        try:
+            await long_term_memory_service.extract_and_store(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=query,
+                assistant_message=response,
+                source="chat",
+            )
+        except Exception as exc:
+            logger.warning(f"【Agent流式响应】抽取长期记忆失败: {exc}")
 
         # 发送结束标记
         yield f"data: {json.dumps({'type': 'done', 'session_id': session_id}, ensure_ascii=False)}\n\n"
