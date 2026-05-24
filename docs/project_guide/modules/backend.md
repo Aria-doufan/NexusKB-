@@ -11,7 +11,7 @@
 - JWT 鉴权、Redis 限流、MySQL 会话持久化。
 - 文件入库、向量检索、重排序和统一响应。
 
-更完整的历史架构说明仍保留在 [后端技术与架构总结](../../backend/BACKEND_SUMMARY.md)。
+更完整的历史架构说明仍保留在 [后端技术与架构总结](../../../backend/BACKEND_SUMMARY.md)。
 
 ## 当前链路
 

@@ -52,7 +52,7 @@
 
 ## 实验结论
 
-完整结果见 [企业 RAG 检索评测实验](../experiments/enterprise_retrieval_eval.md)。
+完整结果见 [企业 RAG 检索评测实验](../../experiments/enterprise_retrieval_eval.md)。
 
 阶段性结论：
 

@@ -1,0 +1,378 @@
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
+os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+class FakeEnterpriseRagService:
+    def __init__(self, documents):
+        self.documents = documents
+        self.retrieve_calls = []
+        self.generated_queries = []
+        self.generated_memory_contexts = []
+
+    async def retrieve(self, **kwargs):
+        self.retrieve_calls.append(kwargs)
+        return self.documents
+
+    async def generate_answer(self, query, documents, memory_context=None):
+        self.generated_queries.append(query)
+        self.generated_memory_contexts.append(memory_context)
+        return f"answer for {query} using {len(documents)} docs"
+
+
+class CapturingTraceStore:
+    def __init__(self):
+        self.saved = []
+
+    async def save(self, trace):
+        self.saved.append(trace)
+
+
+class FailingTraceStore:
+    async def save(self, trace):
+        raise OSError("disk full")
+
+
+class QueryAwareEnterpriseRagService:
+    def __init__(self, documents_by_query):
+        self.documents_by_query = documents_by_query
+        self.retrieve_calls = []
+        self.generated_queries = []
+        self.generated_memory_contexts = []
+
+    async def retrieve(self, **kwargs):
+        self.retrieve_calls.append(kwargs)
+        return self.documents_by_query.get(kwargs["query"], [])
+
+    async def generate_answer(self, query, documents, memory_context=None):
+        self.generated_queries.append(query)
+        self.generated_memory_contexts.append(memory_context)
+        return f"answer for {query} using {len(documents)} docs"
+
+
+def test_enterprise_rag_graph_supports_agentic_intent_taxonomy():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+
+    assert EnterpriseRagGraph._task_type_for_intent("fact_lookup", "Where is policy?") == "fact_lookup"
+    assert EnterpriseRagGraph._task_type_for_intent("semantic_query", "Explain policy") == "semantic_query"
+    assert EnterpriseRagGraph._task_type_for_intent("multi_hop", "Which policies apply?") == "multi_hop"
+    assert EnterpriseRagGraph._task_type_for_intent("comparison", "Compare policies") == "comparison"
+    assert EnterpriseRagGraph._task_type_for_intent("procedure", "How do I request leave?") == "procedure"
+    assert EnterpriseRagGraph._task_type_for_intent("constrained", "Find confluence policy") == "constrained"
+    assert EnterpriseRagGraph._final_top_k_for_intent("comparison") == 10
+    assert EnterpriseRagGraph._search_k_for_intent("multi_hop") == 80
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_decomposes_comparison_queries(monkeypatch):
+    from app.rag import enterprise_rag_graph
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.rag.decomposition import SubQuery, SubQueryPlan
+    from app.schemas.rag import RagState
+
+    async def fake_decompose_query(query, history_context=""):
+        return SubQueryPlan(
+            original_query=query,
+            sub_queries=[
+                SubQuery(id="sq1", query="trial leave process", purpose="fact"),
+                SubQuery(id="sq2", query="full-time leave process", purpose="comparison_dimension"),
+            ],
+        )
+
+    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    service = QueryAwareEnterpriseRagService(
+        {
+            "trial leave process": [
+                {
+                    "parent_doc_id": "parent-1",
+                    "parent_chunk_id": "chunk-1",
+                    "source_type": "policy",
+                    "title": "Trial policy",
+                    "section_heading": "Leave",
+                    "score": 0.7,
+                    "parent_text": "Trial leave process.",
+                }
+            ],
+            "full-time leave process": [
+                {
+                    "parent_doc_id": "parent-2",
+                    "parent_chunk_id": "chunk-2",
+                    "source_type": "policy",
+                    "title": "Full-time policy",
+                    "section_heading": "Leave",
+                    "score": 0.8,
+                    "parent_text": "Full-time leave process.",
+                }
+            ],
+        }
+    )
+    trace_store = CapturingTraceStore()
+    graph = EnterpriseRagGraph(service=service, trace_store=trace_store)
+    state = RagState(
+        request_id="req-decompose",
+        debug_id="dbg-decompose",
+        session_id="sess-decompose",
+        user_id="user-1",
+        original_query="Compare trial and full-time leave process",
+        current_query="Compare trial and full-time leave process",
+        rag_intent="conflicting_info",
+        router_confidence=0.9,
+    )
+
+    response = await graph.run(state)
+
+    assert response.debug_id == "dbg-decompose"
+    assert response.strategy.strategy_name == "conflicting_info"
+    assert [call["query"] for call in service.retrieve_calls] == [
+        "trial leave process",
+        "full-time leave process",
+    ]
+    assert [item.sub_query_id for item in state.sub_queries] == ["sq1", "sq2"]
+    assert response.metrics.retrieval_attempts == 2
+    assert {source.title for source in response.sources} == {"Trial policy", "Full-time policy"}
+    assert trace_store.saved[0].strategy.strategy.use_decompose is True
+    assert [attempt.attempt.sub_query_id for attempt in trace_store.saved[0].retrieval_attempts] == ["sq1", "sq2"]
+    assert any(event["event"] == "query_decomposed" for event in state.sse_events)
+    assert all(event["request_id"] == "req-decompose" for event in state.sse_events)
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_clears_stale_sub_queries_when_decomposition_falls_back(monkeypatch):
+    from app.rag import enterprise_rag_graph
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.rag.decomposition import build_fallback_plan
+    from app.schemas.rag import RagState, SubQuery as RagSubQuery
+
+    async def fake_decompose_query(query, history_context=""):
+        return build_fallback_plan(query, "invalid_json")
+
+    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    service = QueryAwareEnterpriseRagService(
+        {
+            "Compare trial and full-time leave process": [
+                {
+                    "parent_doc_id": "parent-1",
+                    "parent_chunk_id": "chunk-1",
+                    "source_type": "policy",
+                    "title": "Leave policy",
+                    "section_heading": "Leave",
+                    "score": 0.9,
+                    "parent_text": "Trial and full-time leave process comparison.",
+                }
+            ]
+        }
+    )
+    graph = EnterpriseRagGraph(service=service, trace_store=CapturingTraceStore())
+    state = RagState(
+        request_id="req-fallback-decompose",
+        debug_id="dbg-fallback-decompose",
+        user_id="user-1",
+        original_query="Compare trial and full-time leave process",
+        current_query="Compare trial and full-time leave process",
+        rag_intent="conflicting_info",
+        router_confidence=0.9,
+        sub_queries=[RagSubQuery(sub_query_id="stale", query="stale aspect")],
+    )
+
+    response = await graph.run(state)
+
+    assert state.sub_queries == []
+    assert response.evaluation.enough_evidence is True
+    assert response.sources[0].title == "Leave policy"
+    assert service.retrieve_calls[0]["query"] == "Compare trial and full-time leave process"
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_requires_decomposed_query_coverage(monkeypatch):
+    from app.rag import enterprise_rag_graph
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.rag.decomposition import SubQuery, SubQueryPlan
+    from app.schemas.rag import RagState
+
+    async def fake_decompose_query(query, history_context=""):
+        return SubQueryPlan(
+            original_query=query,
+            sub_queries=[
+                SubQuery(id="sq1", query="trial leave process", purpose="fact"),
+                SubQuery(id="sq2", query="full-time leave process", purpose="comparison_dimension"),
+            ],
+        )
+
+    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    service = QueryAwareEnterpriseRagService(
+        {
+            "trial leave process": [
+                {
+                    "parent_doc_id": "parent-1",
+                    "parent_chunk_id": "chunk-1",
+                    "source_type": "policy",
+                    "title": "Trial policy",
+                    "section_heading": "Leave",
+                    "score": 0.7,
+                    "parent_text": "Trial leave process.",
+                }
+            ],
+            "full-time leave process": [],
+        }
+    )
+    graph = EnterpriseRagGraph(service=service, trace_store=CapturingTraceStore())
+    state = RagState(
+        request_id="req-partial-decompose",
+        debug_id="dbg-partial-decompose",
+        user_id="user-1",
+        original_query="Compare trial and full-time leave process",
+        current_query="Compare trial and full-time leave process",
+        rag_intent="conflicting_info",
+        router_confidence=0.9,
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert response.evaluation.enough_evidence is False
+    assert response.evaluation.covered_aspects == ["trial leave process"]
+    assert response.evaluation.missing_aspects == ["full-time leave process"]
+    assert service.generated_queries == []
+    assert "full-time leave process" in response.answer
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_generates_answer_and_saves_trace_for_strong_evidence():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import MemoryItem, RagMemoryContext, RagState
+
+    service = FakeEnterpriseRagService(
+        documents=[
+            {
+                "parent_doc_id": "parent-1",
+                "parent_chunk_id": "chunk-1",
+                "source_type": "confluence",
+                "title": "PTO Policy",
+                "section_heading": "Annual leave",
+                "score": 0.9,
+                "parent_text": "Employees can find PTO rules in the HR page.",
+                "child_text": "PTO rules",
+                "metadata": {"source_type": "confluence"},
+            }
+        ]
+    )
+    trace_store = CapturingTraceStore()
+    graph = EnterpriseRagGraph(service=service, trace_store=trace_store)
+    state = RagState(
+        request_id="req-1",
+        debug_id="dbg-1",
+        session_id="sess-1",
+        user_id="user-1",
+        original_query="Where is the PTO policy?",
+        current_query="Where is the PTO policy?",
+        rag_intent="constrained",
+        source_hints=["confluence"],
+        router_confidence=0.91,
+        router_reason="Needs internal policy docs.",
+        memory_context=RagMemoryContext(
+            recalled=[
+                MemoryItem(
+                    memory_id="memory-1",
+                    content="User is asking about the HR onboarding project.",
+                    category="project_context",
+                    relevance_score=0.9,
+                    source="long_term",
+                )
+            ]
+        ),
+    )
+
+    response = await graph.run(state)
+
+    assert response.debug_id == "dbg-1"
+    assert response.answer == "answer for Where is the PTO policy? using 1 docs"
+    assert response.sources[0].title == "PTO Policy"
+    assert response.evaluation.enough_evidence is True
+    assert response.metrics.retrieval_attempts == 1
+    assert service.retrieve_calls[0]["query"] == "Where is the PTO policy?"
+    assert service.retrieve_calls[0]["source_hints"] == ["confluence"]
+    assert service.retrieve_calls[0]["rag_intent"] == "constrained"
+    assert service.generated_memory_contexts[0] == state.memory_context
+    assert trace_store.saved[0].planner.plan.task_type == "constrained"
+    assert trace_store.saved[0].strategy.strategy.strategy_name == "constrained"
+    assert trace_store.saved[0].retrieval_attempts[0].attempt.selected_documents[0].title == "PTO Policy"
+    assert trace_store.saved[0].evaluations[0].result.enough_evidence is True
+    assert trace_store.saved[0].generation.answer_preview.startswith("answer for")
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_returns_insufficient_evidence_without_generation_when_no_documents():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState
+
+    service = FakeEnterpriseRagService(documents=[])
+    trace_store = CapturingTraceStore()
+    graph = EnterpriseRagGraph(service=service, trace_store=trace_store)
+    state = RagState(
+        request_id="req-2",
+        debug_id="dbg-2",
+        session_id="sess-2",
+        user_id="user-1",
+        original_query="What is the launch code name?",
+        current_query="What is the launch code name?",
+    )
+
+    response = await graph.run(state)
+
+    assert "没有找到足够信息" in response.answer
+    assert response.sources == []
+    assert response.evaluation.enough_evidence is False
+    assert response.evaluation.missing_aspects == ["What is the launch code name?"]
+    assert service.generated_queries == []
+    assert trace_store.saved[0].final_answer_preview == response.answer
+
+
+def test_enterprise_rag_service_formats_dict_documents_for_answer_context():
+    from app.rag.enterprise_rag_service import EnterpriseRagService
+
+    context = EnterpriseRagService._format_context(
+        [
+            {
+                "parent_doc_id": "parent-1",
+                "source_type": "confluence",
+                "title": "PTO Policy",
+                "section_heading": "Annual leave",
+                "parent_text": "Employees can find PTO rules in the HR page.",
+            }
+        ]
+    )
+
+    assert "source_type: confluence" in context
+    assert "title: PTO Policy" in context
+    assert "parent_doc_id: parent-1" in context
+    assert "Employees can find PTO rules" in context
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_warns_but_still_responds_when_trace_store_fails():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState
+
+    service = FakeEnterpriseRagService(documents=[])
+    graph = EnterpriseRagGraph(service=service, trace_store=FailingTraceStore())
+    state = RagState(
+        request_id="req-3",
+        debug_id="dbg-3",
+        user_id="user-1",
+        original_query="Unknown question?",
+        current_query="Unknown question?",
+    )
+
+    response = await graph.run(state)
+
+    assert response.debug_id == "dbg-3"
+    assert any("trace" in warning.lower() for warning in response.warnings)

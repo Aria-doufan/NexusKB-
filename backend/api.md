@@ -1,771 +1,157 @@
-# FastAPI LangChain 接口文档
+# FastAPI Backend API 文档
 
-## 1. 接口概览
+整理日期：2026-05-24
 
-本API提供了基于LangChain的智能对话、RAG检索和文件管理功能，支持JWT认证保护。
+本文档描述 `backend/app/router/chat.py` 当前暴露的 FastAPI 接口。服务默认挂载在 `http://localhost:8000`，聊天、会话、向量、记忆和重排序接口统一使用 `/api` 前缀。
 
-### 基础URL
+## 1. 认证方式
 
-- 本地开发: `http://localhost:8000`
-- 生产环境: 根据部署环境配置
+除公开健康检查和少数调试接口外，业务接口通常需要 Django 用户服务签发的 JWT：
 
-### 认证方式
-
-- 使用JWT Bearer认证
-- 从Django生成的JWT中提取用户UUID作为用户标识
-
-## 2. 认证说明
-
-所有需要认证的接口都需要在请求头中添加以下认证信息：
-
-```
-Authorization: Bearer <your-jwt-token>
+```http
+Authorization: Bearer <jwt-token>
 ```
 
-其中 `<your-jwt-token>` 是从Django认证系统获取的JWT token。
+FastAPI 会使用与 Django 一致的 `SECRET_KEY` / `ALGORITHM` 解析 token，并通过 Django 用户服务读取用户详情；JWT 黑名单检查依赖 Redis。
 
-## 3. API 端点
+## 2. Agent / RouterGraph 接口
 
-### 3.1 Agent 相关接口
+### POST `/api/agent/query/stream`
 
-#### 3.1.1 查询Agent流式响应
+统一在线聊天入口，返回 Server-Sent Events。RouterGraph 会根据问题分流到普通聊天、工具调用、企业知识库 RAG、安全拦截或澄清链路。
 
-**POST /api/agent/query/stream**
-
-功能：向Agent发送查询并获取流式响应，支持会话管理。
-
-**请求参数**：
-
-| 参数名         | 类型     | 必填 | 描述            |
-| ----------- | ------ | -- | ------------- |
-| session\_id | string | 否  | 会话ID，不提供则自动生成 |
-| query       | string | 是  | 查询内容          |
-
-**请求体示例**：
+请求体：
 
 ```json
 {
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "query": "什么是LangChain?"
+  "session_id": "optional-session-id",
+  "query": "用户问题"
 }
 ```
 
-**响应格式**：
+响应：`text/event-stream`，事件中会携带 `request_id`、`debug_id`、`session_id` 等调试字段。
 
-- 类型: `text/event-stream`
-- 数据格式: Server-Sent Events (SSE)
+### POST `/api/agent/router/query`
 
-**响应事件**：
+非流式 RouterGraph 调试/评测入口，返回结构化 `RouterResponse`。
 
-| 事件类型     | 描述   | 数据结构                                                                                                                 |
-| -------- | ---- | -------------------------------------------------------------------------------------------------------------------- |
-| step     | 执行步骤 | `{"type": "step", "content": {"thought": "思考内容", "tool": "工具名称", "tool_input": {"参数": "值"}, "tool_output": "工具输出"}}` |
-| response | 响应内容 | `{"type": "response", "content": "响应片段", "session_id": "会话ID"}`                                                      |
-| done     | 结束标记 | `{"type": "done", "session_id": "会话ID"}`                                                                             |
-| error    | 错误信息 | `{"type": "error", "content": "错误信息", "session_id": "会话ID"}`                                                         |
-
-**示例响应**：
-
-```
-data: {"type": "step", "content": {"thought": "用户询问什么是LangChain，我需要使用RAG工具来获取相关信息", "tool": "rag_summary_tools", "tool_input": {"query": "LangChain定义"}, "tool_output": "LangChain是一个用于构建基于语言模型的应用程序的框架"}}
-
-data: {"type": "response", "content": "LangChain是一个用于构建基于语言模型的应用程序的框架，它提供了一套工具和接口，帮助开发者更方便地集成语言模型到各种应用场景中。", "session_id": "550e8400-e29b-41d4-a716-446655440000"}
-
-data: {"type": "done", "session_id": "550e8400-e29b-41d4-a716-446655440000"}
-```
-
-### 3.2 RAG 相关接口
-
-#### 3.2.1 RAG检索
-
-**POST /api/rag/query**
-
-功能：使用RAG技术检索相关信息并生成摘要。
-
-**请求参数**：
-
-| 参数名   | 类型     | 必填 | 描述   |
-| ----- | ------ | -- | ---- |
-| query | string | 是  | 查询内容 |
-
-**请求体示例**：
+请求体：
 
 ```json
 {
-  "query": "LangChain的核心组件有哪些?"
+  "session_id": "optional-session-id",
+  "query": "用户问题"
 }
 ```
 
-**响应格式**：
+典型返回字段：
 
 ```json
 {
-  "code": 200,
-  "message": "success",
-  "data": {
-    "response": "RAG检索生成的摘要内容"
-  }
+  "response": "回答内容",
+  "session_id": "session-id",
+  "request_id": "request-id",
+  "debug_id": "debug-id"
 }
 ```
 
-**示例响应**：
+## 3. RAG 接口
+
+### POST `/api/rag/query`
+
+经典上传文档 RAG 入口，用于直接调用通用 RAG 检索和摘要链路。
+
+请求体：
 
 ```json
 {
-  "code": 200,
-  "message": "success",
-  "data": {
-    "response": "LangChain的核心组件包括：1. LLMs - 语言模型，2. Prompts - 提示模板，3. Chains - 链式调用，4. Agents - 智能代理，5. Memory - 记忆管理，6. Retrievers - 检索器..."
-  }
+  "query": "检索问题"
 }
 ```
 
-### 3.3 会话管理接口
+## 4. 会话接口
 
-#### 3.3.1 获取会话信息
+### GET `/api/session/{session_id}`
 
-**GET /api/session/{session\_id}**
+获取当前用户指定会话的历史记录。
 
-功能：获取指定会话的历史记录，使用user\_id验证。
+### DELETE `/api/session/{session_id}`
 
-**路径参数**：
+删除当前用户指定会话及其历史记录。
 
-| 参数名         | 类型     | 必填 | 描述   |
-| ----------- | ------ | -- | ---- |
-| session\_id | string | 是  | 会话ID |
+### GET `/api/sessions`
 
-**响应格式**：
+获取系统中的会话 ID 列表。该接口主要用于调试/管理视图。
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "session_id": "会话ID",
-    "history": [
-      ["用户问题1", "助手回答1"],
-      ["用户问题2", "助手回答2"]
-    ]
-  }
-}
-```
+### GET `/api/sessions/{user_id}`
 
-**示例请求**：
+获取指定用户的会话 ID 列表。接口会校验当前 JWT 用户身份，不能越权读取其他用户会话。
 
-```bash
-GET http://localhost:8000/api/session/550e8400-e29b-41d4-a716-446655440000
-Authorization: Bearer your-jwt-token
-```
+## 5. 长期记忆接口
 
-**示例响应**：
+### GET `/api/memories`
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "history": [
-      ["什么是LangChain?", "LangChain是一个用于构建基于语言模型的应用程序的框架..."],
-      ["它有哪些核心组件?", "LangChain的核心组件包括：LLMs、Prompts、Chains、Agents、Memory、Retrievers..."]
-    ]
-  }
-}
-```
+列出当前用户 active 长期记忆。
 
-#### 3.3.2 删除会话
+查询参数：
 
-**DELETE /api/session/{session\_id}**
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | int | `50` | 返回数量，范围 1-100 |
+| `offset` | int | `0` | 分页偏移量 |
 
-功能：删除指定会话及其历史记录。
+### DELETE `/api/memories/{memory_id}`
 
-**路径参数**：
+软删除当前用户指定长期记忆。删除以 MySQL `status=deleted` 为准，向量库删除为 best-effort。
 
-| 参数名         | 类型     | 必填 | 描述   |
-| ----------- | ------ | -- | ---- |
-| session\_id | string | 是  | 会话ID |
+> 当前 FastAPI 路由没有暴露 `GET /api/memories/search`。语义召回由 RouterGraph/长期记忆服务在问答链路内部使用；如果评测脚本需要独立搜索端点，应先补接口再把它写成已实现 API。
 
-**响应格式**：
+## 6. 向量库接口
+
+### POST `/api/vector/add/single`
+
+上传单个 PDF/TXT 文件并写入当前用户的向量集合。
+
+### POST `/api/vector/add/multiple`
+
+上传多个 PDF/TXT 文件并写入当前用户的向量集合。
+
+### DELETE `/api/vector/clean`
+
+删除当前用户上传的所有向量数据。
+
+## 7. 重排序接口
+
+### POST `/api/reorder`
+
+独立重排序调试接口，使用本地 reranker 对输入文档排序。
+
+请求体：
 
 ```json
 {
-  "code": 200,
-  "message": "Session {session_id} deleted successfully",
-  "data": null
-}
-```
-
-**示例请求**：
-
-```bash
-DELETE http://localhost:8000/api/session/550e8400-e29b-41d4-a716-446655440000
-Authorization: Bearer your-jwt-token
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "Session 550e8400-e29b-41d4-a716-446655440000 deleted successfully",
-  "data": null
-}
-```
-
-#### 3.3.3 获取所有会话ID
-
-**GET /api/sessions**
-
-功能：获取系统中所有会话的ID。
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["会话ID1", "会话ID2", "会话ID3"]
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/api/sessions
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"]
-  }
-}
-```
-
-#### 3.3.4 获取用户所有会话ID
-
-**GET /api/sessions/{user\_id}**
-
-功能：获取指定用户的所有会话ID（只能获取自己的会话）。
-
-**路径参数**：
-
-| 参数名      | 类型     | 必填 | 描述   |
-| -------- | ------ | -- | ---- |
-| user\_id | string | 是  | 用户ID |
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["会话ID1", "会话ID2"]
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/api/sessions/12345678-1234-1234-1234-123456789012
-Authorization: Bearer your-jwt-token
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "sessions": ["550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"]
-  }
-}
-```
-
-### 3.4 向量数据库接口
-
-#### 3.4.1 上传单个文件
-
-**POST /api/vector/add/single**
-
-功能：上传单个文件到向量数据库，支持TXT和PDF格式。
-
-**请求参数**：
-
-| 参数名  | 类型   | 必填 | 描述                 |
-| ---- | ---- | -- | ------------------ |
-| file | file | 是  | 要上传的文件，支持TXT和PDF格式 |
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "文件 {filename} 已成功上传并存储到向量数据库",
-  "data": null
-}
-```
-
-**示例请求**：
-
-```bash
-POST http://localhost:8000/api/vector/add/single
-Content-Type: multipart/form-data
-Authorization: Bearer your-jwt-token
-
-# 表单数据
-file: [选择文件]
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "文件 example.pdf 已成功上传并存储到向量数据库",
-  "data": null
-}
-```
-
-**限制**：
-
-- 文件大小不能超过20MB
-- 仅支持PDF和TXT文件
-
-#### 3.4.2 上传多个文件
-
-**POST /api/vector/add/multiple**
-
-功能：上传多个文件到向量数据库，支持TXT和PDF格式。
-
-**请求参数**：
-
-| 参数名   | 类型           | 必填 | 描述                   |
-| ----- | ------------ | -- | -------------------- |
-| files | array\[file] | 是  | 要上传的文件列表，支持TXT和PDF格式 |
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "文件 [\"file1.pdf\", \"file2.txt\"] 已成功上传并存储到向量数据库",
-  "data": null
-}
-```
-
-**示例请求**：
-
-```bash
-POST http://localhost:8000/api/vector/add/multiple
-Content-Type: multipart/form-data
-Authorization: Bearer your-jwt-token
-
-# 表单数据
-files: [选择多个文件]
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "文件 [\"example1.pdf\", \"example2.txt\"] 已成功上传并存储到向量数据库",
-  "data": null
-}
-```
-
-**限制**：
-
-- 文件总大小不能超过200MB
-- 仅支持PDF和TXT文件
-
-#### 3.4.3 清空用户向量
-
-**DELETE /api/vector/clean**
-
-功能：删除当前用户上传的所有向量数据。
-
-**请求头**：
-
-| 参数名           | 类型     | 必填 | 描述                 |
-| ------------- | ------ | -- | ------------------ |
-| Authorization | string | 是  | Bearer {jwt-token} |
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "已成功删除用户上传的所有向量",
-  "data": null
-}
-```
-
-**示例请求**：
-
-```bash
-DELETE http://localhost:8000/api/vector/clean
-Authorization: Bearer your-jwt-token
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "已成功删除用户上传的所有向量",
-  "data": null
-}
-```
-
-### 3.5 文档重排序接口
-
-#### 3.5.1 文档中文重排序
-
-**POST /api/reorder**
-
-功能：使用Ollama本地的嵌入模型对文档进行中文重排序。
-
-**请求参数**：
-
-| 参数名       | 类型             | 必填 | 描述   |
-| --------- | -------------- | -- | ---- |
-| query     | string         | 是  | 查询内容 |
-| documents | array\[string] | 是  | 文档列表 |
-
-**请求体示例**：
-
-```json
-{
-  "query": "人工智能的发展历程",
+  "query": "如何实现 RAG 系统",
   "documents": [
-    "人工智能是计算机科学的一个分支...",
-    "机器学习是人工智能的核心技术之一...",
-    "深度学习在近年来取得了显著进展..."
+    "候选文档 A",
+    "候选文档 B"
   ]
 }
 ```
 
-**响应格式**：
+## 8. 健康检查
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "documents": [
-      {
-        "content": "文档内容",
-        "score": 0.95
-      }
-    ]
-  }
-}
-```
+健康检查接口不使用 `/api` 前缀。
 
-**示例响应**：
+### GET `/health/live`
 
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "documents": [
-      {
-        "content": "深度学习在近年来取得了显著进展...",
-        "score": 0.98
-      },
-      {
-        "content": "机器学习是人工智能的核心技术之一...",
-        "score": 0.85
-      },
-      {
-        "content": "人工智能是计算机科学的一个分支...",
-        "score": 0.72
-      }
-    ]
-  }
-}
-```
+进程存活检查。
 
-### 3.6 健康检查接口
+### GET `/health/ready`
 
-#### 3.6.1 健康检查-存活
+依赖就绪检查，通常包括 MySQL、Redis 等关键依赖。
 
-**GET /health/live**
+## 9. 相关文档
 
-功能：检查应用程序是否正常运行。
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "health application status",
-  "data": {
-    "status": "ok"
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/health/live
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "health application status",
-  "data": {
-    "status": "ok"
-  }
-}
-```
-
-#### 3.6.2 健康检查-就绪
-
-**GET /health/ready**
-
-功能：检查应用程序是否就绪，包括数据库连接状态。
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "health readiness status",
-  "data": {
-    "status": "ok"
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/health/ready
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "health readiness status",
-  "data": {
-    "status": "ok"
-  }
-}
-```
-
-**错误响应**：
-
-```json
-{
-  "code": 503,
-  "message": "MySQL或Redis连接失败",
-  "data": null
-}
-```
-
-### 3.7 用户接口
-
-#### 3.7.1 获取用户信息
-
-**GET /user/detail/**
-
-功能：获取当前用户的详细信息。
-
-**请求头**：
-
-| 参数名           | 类型     | 必填 | 描述                 |
-| ------------- | ------ | -- | ------------------ |
-| Authorization | string | 是  | Bearer {jwt-token} |
-
-**响应格式**：
-
-```json
-{
-  "code": 200,
-  "message": "获取用户信息成功",
-  "data": {
-    "user_id": "用户ID",
-    "username": "用户名",
-    "email": "邮箱地址"
-  }
-}
-```
-
-**示例请求**：
-
-```bash
-GET http://localhost:8000/user/detail/
-Authorization: Bearer your-jwt-token
-```
-
-**示例响应**：
-
-```json
-{
-  "code": 200,
-  "message": "获取用户信息成功",
-  "data": {
-    "user_id": "12345678-1234-1234-1234-123456789012",
-    "username": "testuser",
-    "email": "test@example.com"
-  }
-}
-```
-
-## 4. 错误处理
-
-### 401 Unauthorized
-
-- 原因：认证失败，JWT token无效或过期
-- 响应格式：
-  ```json
-  {
-    "code": 401,
-    "message": "Could not validate credentials",
-    "data": null
-  }
-  ```
-
-### 403 Forbidden
-
-- 原因：权限不足，尝试访问其他用户的资源
-- 响应格式：
-  ```json
-  {
-    "code": 403,
-    "message": "Forbidden",
-    "data": null
-  }
-  ```
-
-### 400 Bad Request
-
-- 原因：请求参数错误，如文件类型不支持或文件大小超过限制
-- 响应格式：
-  ```json
-  {
-    "code": 400,
-    "message": "文件大小不能超过20MB",
-    "data": null
-  }
-  ```
-
-### 500 Internal Server Error
-
-- 原因：服务器内部错误
-- 响应格式：
-  ```json
-  {
-    "code": 500,
-    "message": "服务器内部错误",
-    "data": {
-      "error_type": "ErrorType",
-      "error_detail": "错误详情",
-      "traceback": "堆栈跟踪信息",
-      "path": "/api/endpoint"
-    }
-  }
-  ```
-
-## 5. 使用示例
-
-### 5.1 认证示例
-
-```bash
-# 使用curl发送认证请求
-curl -X POST "http://localhost:8000/api/agent/query/stream" \
-  -H "Authorization: Bearer your-jwt-token" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "什么是LangChain?"}'
-```
-
-### 5.2 流式响应示例
-
-```javascript
-// 使用JavaScript接收流式响应
-const eventSource = new EventSource("http://localhost:8000/api/agent/query/stream", {
-  headers: {
-    "Authorization": "Bearer your-jwt-token",
-    "Content-Type": "application/json"
-  },
-  method: "POST",
-  body: JSON.stringify({ query: "什么是LangChain?" })
-});
-
-eventSource.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  switch (data.type) {
-    case "step":
-      console.log("执行步骤:", data.content);
-      break;
-    case "response":
-      console.log("响应内容:", data.content);
-      break;
-    case "done":
-      console.log("会话ID:", data.session_id);
-      eventSource.close();
-      break;
-    case "error":
-      console.error("错误:", data.content);
-      eventSource.close();
-      break;
-  }
-};
-```
-
-### 5.3 文件上传示例
-
-```bash
-# 使用curl上传单个文件
-curl -X POST "http://localhost:8000/api/vector/add/single" \
-  -H "Authorization: Bearer your-jwt-token" \
-  -F "file=@/path/to/file.pdf"
-
-# 使用curl上传多个文件
-curl -X POST "http://localhost:8000/api/vector/add/multiple" \
-  -H "Authorization: Bearer your-jwt-token" \
-  -F "files=@/path/to/file1.pdf" \
-  -F "files=@/path/to/file2.txt"
-```
-
-## 6. 注意事项
-
-1. **会话管理**：
-   - 不提供session\_id时，系统会自动生成一个UUID作为会话ID
-   - 会话ID用于跟踪和存储对话历史
-2. **文件上传**：
-   - 单个文件大小限制为20MB
-   - 多个文件总大小限制为200MB
-   - 仅支持PDF和TXT格式的文件
-3. **认证**：
-   - 所有需要用户身份的接口都需要JWT认证
-   - JWT token应从Django认证系统获取
-4. **权限控制**：
-   - 用户只能访问和管理自己的会话
-   - 尝试访问其他用户的会话会返回403 Forbidden错误
-5. **响应格式**：
-   - 非流式接口返回JSON格式，包含code、message和data字段
-   - 流式接口返回Server-Sent Events格式
-6. **工具调用**：
-   - 当使用天气工具时，需要提供城市名称作为参数
-   - 其他工具也需要提供相应的必需参数
-
+- Django 用户服务 API：`../DjangoUserService/api.md`
+- 文档入口：`../docs/README.md`
+- 项目架构图：`../docs/project_guide/NEXUSKB_ARCHITECTURE_DIAGRAMS.md`

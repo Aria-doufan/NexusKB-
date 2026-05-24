@@ -1,41 +1,35 @@
 <template>
   <div class="profile-page">
-    <van-nav-bar
-      title="个人信息"
-      left-arrow
-      @click-left="$router.back()"
-      fixed
-    />
-    
-    <div class="profile-container">
-      <van-cell-group inset class="avatar-group">
-        <van-cell title="头像" center is-link @click="showAvatarDialog">
-          <template #right-icon>
-            <van-image
-              round
-              width="60"
-              height="60"
-              :src="userInfo?.avatar ? `http://localhost:8001${userInfo.avatar}` : 'https://fastly.jsdelivr.net/npm/@vant/assets/cat.jpeg'"
-            />
-          </template>
-        </van-cell>
-      </van-cell-group>
-      
-      <van-cell-group inset class="info-group">
-        <van-cell title="用户ID" :value="userInfo?.id || userInfo?.uuid || '未设置'" />
-        <van-cell title="用户名" :value="userInfo?.username || '未设置'" is-link @click="showUsernameDialog" />
-        <van-cell title="邮箱" :value="userInfo?.email || '未设置'" is-link @click="showEmailDialog" />
-        <van-cell title="手机号" :value="userInfo?.telephone || '未设置'" is-link @click="showPhoneDialog" />
-        <van-cell title="性别" :value="genderText || '未设置'" is-link @click="showGenderDialog" />
-        <van-cell title="个人简介" :value="userBio || '暂无简介'" is-link @click="showBioDialog" />
-        <van-cell title="注册时间" :value="createTimeText || '未设置'" />
-        <van-cell title="最后登录时间" :value="lastLoginText || '未设置'" />
-      </van-cell-group>
-      
-      <van-cell-group inset class="security-group">
-        <van-cell title="修改密码" is-link @click="showPasswordConfirm" />
-      </van-cell-group>
-    </div>
+    <section class="profile-grid">
+      <aside class="profile-summary enterprise-card">
+        <div class="profile-avatar">{{ (userInfo?.username || 'N').slice(0, 1).toUpperCase() }}</div>
+        <h2>{{ userInfo?.username || '未设置' }}</h2>
+        <p>{{ userBio || '暂无简介' }}</p>
+        <button class="enterprise-button secondary" @click="showAvatarDialog">更换头像</button>
+      </aside>
+
+      <section class="profile-details enterprise-card">
+        <p class="shell-eyebrow">Profile Details</p>
+        <h2>个人资料</h2>
+        <div class="profile-list">
+          <button @click="showUsernameDialog"><span>用户名</span><strong>{{ userInfo?.username || '未设置' }}</strong></button>
+          <button @click="showEmailDialog"><span>邮箱</span><strong>{{ userInfo?.email || '未设置' }}</strong></button>
+          <button @click="showPhoneDialog"><span>手机号</span><strong>{{ userInfo?.telephone || '未设置' }}</strong></button>
+          <button @click="showGenderDialog"><span>性别</span><strong>{{ genderText || '未设置' }}</strong></button>
+          <button @click="showBioDialog"><span>个人简介</span><strong>{{ userBio || '暂无简介' }}</strong></button>
+          <div><span>用户ID</span><strong>{{ userInfo?.id || userInfo?.uuid || '未设置' }}</strong></div>
+          <div><span>注册时间</span><strong>{{ createTimeText || '未设置' }}</strong></div>
+          <div><span>最后登录时间</span><strong>{{ lastLoginText || '未设置' }}</strong></div>
+        </div>
+      </section>
+
+      <section class="profile-security enterprise-card">
+        <p class="shell-eyebrow">Security</p>
+        <h2>账户安全</h2>
+        <p>定期更新密码可以降低账户风险。</p>
+        <button class="enterprise-button" @click="showPasswordConfirm">修改密码</button>
+      </section>
+    </section>
   </div>
 </template>
 
@@ -627,42 +621,141 @@ const showAvatarDialog = () => {
 
 <style scoped>
 .profile-page {
-  min-height: 100vh;
-  background-color: #f7f8fa;
+  display: grid;
+  gap: 20px;
 }
 
-.profile-container {
-  padding-top: 56px;
-  padding-bottom: 20px;
+.profile-grid {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 20px;
+  align-items: start;
 }
 
-.avatar-group,
-.info-group,
-.security-group {
-  margin-top: 12px;
+.profile-summary,
+.profile-details,
+.profile-security {
+  padding: 24px;
 }
 
-.password-dialog .van-dialog__content {
-  padding: 20px;
+.profile-summary {
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+  position: sticky;
+  top: 24px;
 }
 
-.password-form .form-item {
-  margin-bottom: 15px;
-  text-align: left;
+.profile-avatar {
+  width: 104px;
+  height: 104px;
+  border-radius: 32px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 2.6rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #1d4ed8, #0ea5e9 54%, #38bdf8);
+  box-shadow: 0 22px 42px rgba(37, 99, 235, 0.26);
 }
 
-.password-form .form-item span {
-  display: block;
-  margin-bottom: 5px;
-  text-align: left;
+.profile-summary h2,
+.profile-details h2,
+.profile-security h2 {
+  margin: 0;
+  color: var(--color-text);
 }
 
-.password-form .password-input {
+.profile-summary p,
+.profile-security p {
+  margin: 0;
+  color: var(--color-muted);
+  line-height: 1.7;
+}
+
+.profile-details {
+  display: grid;
+  gap: 18px;
+}
+
+.profile-list {
+  display: grid;
+  gap: 10px;
+}
+
+.profile-list button,
+.profile-list div {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
   width: 100%;
-  border: 1px solid #dcdee0;
-  border-radius: 4px;
-  padding: 8px;
-  outline: none;
-  box-sizing: border-box;
+  padding: 16px 18px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 16px;
+  background: rgba(248, 250, 252, 0.78);
+  color: inherit;
+  text-align: left;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.profile-list button {
+  cursor: pointer;
+}
+
+.profile-list button:hover {
+  transform: translateY(-2px);
+  border-color: rgba(37, 99, 235, 0.32);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
+}
+
+.profile-list span {
+  color: var(--color-muted);
+  font-size: 0.92rem;
+}
+
+.profile-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.profile-security {
+  grid-column: 2;
+  display: grid;
+  justify-items: start;
+  gap: 14px;
+}
+
+.shell-eyebrow {
+  margin: 0;
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 920px) {
+  .profile-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-summary {
+    position: static;
+  }
+
+  .profile-security {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .profile-list button,
+  .profile-list div {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }
 </style>

@@ -20,9 +20,11 @@ NexusKB 适合用于：
 - RAG 检索链路：支持文档解析、文本切分、向量化、ChromaDB 索引和相似度召回。
 - 检索结果重排序：支持本地 reranker 模型，对初步召回片段进行二次排序。
 - 会话记忆：使用 MySQL 持久化聊天历史，支持多轮对话上下文。
+- 长期记忆实验：新增长期记忆抽取、去重、向量召回和评估脚本，用于验证跨会话记忆效果。
 - 用户体系：独立 Django 用户服务，提供注册、登录、JWT 鉴权、Token 刷新和用户信息接口。
 - 前端应用：Vue 3 前端提供登录、注册、聊天、会话、个人中心和设置页面。
 - 缓存与限流：Redis 用于用户信息缓存、Token 黑名单和接口限流。
+- 观测与审计：补充性能日志、审计日志脱敏工具和长期记忆评测输出，便于定位检索、记忆和回答链路问题。
 - 多模型接入：支持 DashScope 云端模型，也预留 Ollama、本地 embedding 和 reranker 模型配置。
 
 ## 架构概览
@@ -56,7 +58,11 @@ NexusKB/
 │   ├── src/
 │   ├── package.json
 │   └── vite.config.js
-├── docs/                    # 项目文档
+├── docs/                    # 项目文档、架构说明、实验记录和运维文档
+│   ├── experiments/         # RAG 延迟优化、长期记忆评估等实验记录
+│   ├── ops/                 # 部署、故障排除和模型配置说明
+│   └── project_guide/       # 项目介绍、模块说明和架构图
+├── start-dev.ps1            # Windows 本地开发一键启动脚本
 ├── requirements.txt         # Python 聚合依赖
 └── .gitignore
 ```
@@ -212,6 +218,14 @@ cd front
 npm run dev
 ```
 
+Windows 本地开发也可以使用根目录脚本同时拉起 Redis、Django、FastAPI 和前端：
+
+```powershell
+.\start-dev.ps1 -Migrate
+```
+
+默认使用 `NexusKB` conda 环境；如果想使用 `.venv` 或 PATH 中的 Python，可以传入 `-CondaEnv ''`。
+
 ## 数据说明
 
 本项目使用企业知识库类数据进行 RAG 检索实验，重点关注企业文档、问题集、知识片段和检索评测结果。仓库不会直接提交原始数据、生成后的向量库或本地运行缓存。
@@ -236,6 +250,22 @@ backend/app/config/rag.yaml
 backend/scripts/
 ```
 
+其中企业 RAG parent-child 索引默认使用：
+
+```text
+backend/data/enterprise_rag_bench/child_chunks_parent_child.jsonl
+backend/data/chromadb_enterprise_parent_child
+enterprise_rag_bench_parent_child
+```
+
+长期记忆评估资产包括：
+
+```text
+backend/scripts/evaluate_long_term_memory.py
+backend/scripts/memory_eval_golden_cases.jsonl
+docs/experiments/memory_eval.md
+```
+
 
 ## 未来方向
 
@@ -244,15 +274,24 @@ backend/scripts/
 - 完善 reranker 评测指标。
 - 增加回答引用来源展示。
 - 增加知识库上传、索引状态和管理页面。
-- 增强会话记忆，从固定轮数升级为 token-aware 记忆。
+- 完善长期记忆的数据模型、数据库迁移、API 暴露和端到端验收。
 - 增加 Docker Compose 和 CI。
 - 增加权限分级和文件上传安全检查。
 
 ## 更多文档
 
 - [项目介绍](./docs/PROJECT_INTRO.md)
+- [项目总览](./docs/PROJECT_OVERVIEW.md)
+- [项目指南](./docs/project_guide/README.md)
 - [部署说明](./docs/deployment.md)
+- [运维部署说明](./docs/ops/deployment.md)
 - [故障排除](./docs/troubleshooting.md)
 - [Hugging Face / ModelScope 模型配置](./docs/huggingface_model.md)
+- [RAGFlow Agentic RAG 架构设计](./docs/RAGFLOW_AGENTIC_RAG_ARCHITECTURE.md)
+- [RAGFlow Agentic RAG 评测方案](./docs/RAGFLOW_AGENTIC_RAG_EVALUATION.md)
+- [RAGFlow Agentic RAG 路线图](./docs/RAGFLOW_AGENTIC_RAG_ROADMAP.md)
+- [RAGFlow Agentic RAG 安全边界](./docs/RAGFLOW_AGENTIC_RAG_SECURITY.md)
+- [长期记忆评估流程](./docs/experiments/memory_eval.md)
+- [企业 RAG 延迟优化记录](./docs/experiments/enterprise_rag_latency_optimization.md)
 - [FastAPI API 文档](./backend/api.md)
 - [Django 用户服务 API 文档](./DjangoUserService/api.md)

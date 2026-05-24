@@ -11,6 +11,7 @@ from app.rag.rag_service import RagService
 from app.rag.reorder_service import reorder_service
 from app.agent.router_graph import router_graph
 from app.services import session_manager as sm
+from app.services.long_term_memory import long_term_memory_service
 
 class ChatService:
     """路由服务层，处理业务逻辑"""
@@ -57,6 +58,15 @@ class ChatService:
 
         sessions = await sm.session_manager.get_user_sessions(user_id)
         return sessions
+
+    async def handle_list_memories(self, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        memories = await long_term_memory_service.list_memories(user_id, limit=limit, offset=offset)
+        return [memory.to_dict() for memory in memories]
+
+    async def handle_delete_memory(self, memory_id: str, user_id: str) -> None:
+        deleted = await long_term_memory_service.delete_memory(memory_id, user_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Memory not found")
 
     async def handle_add_vector_single(self, file: UploadFile, user_id: str) -> str:
         """处理添加单个向量逻辑"""
@@ -142,8 +152,8 @@ class ChatService:
             result = await reorder_service.reorder_documents(query, documents)
             
             if result["success"]:
-                # log记录排序结果
-                logger.info(f"【重排序结果】查询: {query} 排序结果: {[f'文档 {doc['document']}: {doc['similarity']:.4f}' for doc in result['documents']]}")
+                ranked_documents = [f"文档 {doc['document']}: {doc['similarity']:.4f}" for doc in result["documents"]]
+                logger.info(f"【重排序结果】查询: {query} 排序结果: {ranked_documents}")
                 return result["documents"]
             else:
                 logger.warning(f"【重排序失败】{result['error']}")

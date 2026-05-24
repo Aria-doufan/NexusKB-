@@ -1,47 +1,41 @@
 <template>
-  <div class="my-container">
-    <van-nav-bar :title="$t('my.title')" />
-    <div class="user-info" @click="goToProfile" v-if="isLogin">
-      <div class="avatar">
-        <van-image
-          round
-          width="80"
-          height="80"
-          :src="userInfo && userInfo.avatar ? `http://localhost:8001${userInfo.avatar}` : 'https://fastly.jsdelivr.net/npm/@vant/assets/cat.jpeg'"
-        />
+  <div class="account-page">
+    <section class="account-overview-card enterprise-card">
+      <div class="account-avatar">{{ userInitial }}</div>
+      <div>
+        <p class="shell-eyebrow">Account Overview</p>
+        <h2>{{ isLogin && userInfo ? userInfo.username : $t('my.notLoggedIn') }}</h2>
+        <p>{{ isLogin && userInfo ? userBio : '登录后可查看个人资料和历史会话。' }}</p>
       </div>
-      <div class="info">
-        <div class="username">{{ isLogin && userInfo ? userInfo.username : $t('my.notLoggedIn') }}</div>
-        <div class="desc" v-if="isLogin && userInfo">{{ userBio || $t('profile.bio') }}</div>
+      <div class="account-actions">
+        <button v-if="isLogin" class="enterprise-button" @click="goToProfile">编辑资料</button>
+        <button v-if="!isLogin" class="enterprise-button" @click="goToLogin">{{ $t('my.goToLogin') }}</button>
+        <button v-if="!isLogin" class="enterprise-button secondary" @click="goToRegister">{{ $t('my.goToRegister') }}</button>
       </div>
-      <van-icon name="arrow" class="arrow-icon" />
-    </div>
-    <div class="user-info" v-else>
-      <div class="avatar">
-        <van-image
-          round
-          width="80"
-          height="80"
-          src="https://fastly.jsdelivr.net/npm/@vant/assets/cat.jpeg"
-        />
-      </div>
-      <div class="info">
-        <div class="username">{{ $t('my.notLoggedIn') }}</div>
-        <div class="desc">
-          <van-button type="primary" size="small" @click="goToLogin" style="margin-right: 10px">{{ $t('my.goToLogin') }}</van-button>
-          <van-button type="default" size="small" @click="goToRegister">{{ $t('my.goToRegister') }}</van-button>
-        </div>
-      </div>
-    </div>
+    </section>
 
-    <div class="menu-list">
-      <van-cell-group inset>
-        <van-cell :title="$t('my.notifications')" is-link />
-        <van-cell :title="$t('my.settings')" is-link @click="goToSettings" />
-        <van-cell v-if="isLogin" :title="$t('my.logout')" @click="handleLogout" />
-      </van-cell-group>
-    </div>
-    <tab-bar />
+    <section class="account-grid">
+      <article class="enterprise-card account-stat">
+        <span class="enterprise-tag">会话</span>
+        <strong>历史会话</strong>
+        <p>继续查看和管理企业知识问答记录。</p>
+        <button class="enterprise-button secondary" @click="$router.push('/sessions')">进入会话管理</button>
+      </article>
+
+      <article class="enterprise-card account-stat">
+        <span class="enterprise-tag">设置</span>
+        <strong>偏好设置</strong>
+        <p>调整语言、主题和知识库使用偏好。</p>
+        <button class="enterprise-button secondary" @click="goToSettings">进入设置</button>
+      </article>
+
+      <article v-if="isLogin" class="enterprise-card account-stat danger-zone">
+        <span class="enterprise-tag">账户</span>
+        <strong>{{ $t('my.logout') }}</strong>
+        <p>退出当前账号并清除本地登录状态。</p>
+        <button class="enterprise-button danger" @click="handleLogout">{{ $t('my.logout') }}</button>
+      </article>
+    </section>
   </div>
 </template>
 
@@ -51,7 +45,6 @@ import { useUserStore } from '../store/user';
 import { useRouter } from 'vue-router';
 import { computed, ref } from 'vue';
 import { showDialog, showToast } from 'vant';
-import TabBar from '../components/TabBar.vue';
 import { useI18n } from 'vue-i18n';
 
 const userStore = useUserStore();
@@ -62,6 +55,7 @@ const { t } = useI18n();
 const userInfo = computed(() => userStore.userInfo);
 const isLogin = computed(() => userStore.getLoginStatus);
 const userBio = computed(() => userStore.getUserBio || t('profile.bio'));
+const userInitial = computed(() => (userInfo.value?.username || 'N').slice(0, 1).toUpperCase());
 
 // 跳转到登录页
 const goToLogin = () => {
@@ -112,60 +106,105 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.my-container {
-  padding-top: 46px;
-  padding-bottom: 50px;
-  background-color: var(--background-color);
-  color: var(--text-color);
-  min-height: 100vh;
-  box-sizing: border-box;
+.account-page {
+  display: grid;
+  gap: 20px;
 }
 
-.van-nav-bar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  z-index: 999;
-}
-
-.user-info {
-  display: flex;
+.account-overview-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  padding: 20px 16px;
-  background-color: var(--primary-color);
+  gap: 24px;
+  padding: 28px;
+  background:
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), transparent 34%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(239, 246, 255, 0.92));
+}
+
+.account-overview-card h2 {
+  margin: 6px 0 8px;
+  color: var(--color-text);
+  font-size: clamp(1.6rem, 3vw, 2.35rem);
+  line-height: 1.1;
+}
+
+.account-overview-card p:not(.shell-eyebrow) {
+  margin: 0;
+  color: var(--color-muted);
+}
+
+.account-avatar {
+  width: 86px;
+  height: 86px;
+  border-radius: 28px;
+  display: grid;
+  place-items: center;
   color: #fff;
-  border-radius: 8px;
-  margin: 16px;
-  position: relative;
+  font-size: 2.2rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, #1d4ed8, #38bdf8);
+  box-shadow: 0 18px 35px rgba(37, 99, 235, 0.28);
 }
 
-.arrow-icon {
-  position: absolute;
-  right: 16px;
-  color: #969799;
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
-.avatar {
-  margin-right: 16px;
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
 }
 
-.info {
-  flex: 1;
+.account-stat {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 24px;
 }
 
-.username {
-  font-size: 18px;
-  font-weight: bold;
-  margin-bottom: 4px;
+.account-stat strong {
+  color: var(--color-text);
+  font-size: 1.25rem;
 }
 
-.desc {
-  font-size: 14px;
-  color: #999;
+.account-stat p {
+  margin: 0;
+  color: var(--color-muted);
+  line-height: 1.7;
 }
 
-.menu-list {
-  margin: 0 16px;
+.danger-zone {
+  border-color: rgba(220, 38, 38, 0.18);
+}
+
+.enterprise-button.danger {
+  background: linear-gradient(135deg, #dc2626, #f97316);
+  box-shadow: 0 14px 26px rgba(220, 38, 38, 0.22);
+}
+
+.shell-eyebrow {
+  margin: 0;
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .account-overview-card {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .account-actions {
+    justify-content: flex-start;
+  }
 }
 </style>

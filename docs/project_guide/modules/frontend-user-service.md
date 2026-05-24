@@ -14,7 +14,7 @@
 
 用户服务 API 的当前维护入口是：
 
-- [Django 用户服务 API](../../DjangoUserService/api.md)
+- [Django 用户服务 API](../../../DjangoUserService/api.md)
 
 `front/api.md` 与该文档内容重复，后续维护时以 `DjangoUserService/api.md` 为准。
 

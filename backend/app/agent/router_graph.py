@@ -13,9 +13,11 @@ from pydantic import BaseModel, Field, ValidationError
 from app.agent.agent import get_agent_response, get_agent_stream_response, get_chat_response, get_chat_stream_response
 from app.core.logger_handler import logger
 from app.core.perf import log_perf, perf_counter
-from app.rag.enterprise_rag_service import enterprise_rag_service
+from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+from app.schemas.rag import MemoryItem, RagMemoryContext, RagState
 from app.services import session_manager as sm
 from app.services.conversation_memory import conversation_memory_service
+from app.services.long_term_memory import long_term_memory_service
 
 
 Route = Literal["enterprise_knowledge", "tool_action", "chat", "unsafe_or_system", "clarify"]
@@ -50,16 +52,25 @@ LEGACY_ROUTE_ALIASES: dict[str, str] = {
     "system": "unsafe_or_system",
 }
 ALLOWED_RAG_INTENTS: set[str] = {
-    "basic",
-    "semantic",
-    "intra_document_reasoning",
-    "project_related",
+    "fact_lookup",
+    "semantic_query",
+    "multi_hop",
+    "comparison",
+    "procedure",
     "constrained",
-    "conflicting_info",
-    "completeness",
-    "high_level",
-    "info_not_found",
+    "follow_up",
+    "not_enough_info",
     "unknown",
+}
+LEGACY_RAG_INTENT_ALIASES: dict[str, str] = {
+    "basic": "fact_lookup",
+    "semantic": "semantic_query",
+    "intra_document_reasoning": "multi_hop",
+    "project_related": "multi_hop",
+    "conflicting_info": "comparison",
+    "completeness": "multi_hop",
+    "high_level": "semantic_query",
+    "info_not_found": "not_enough_info",
 }
 ALLOWED_SOURCE_HINTS: set[str] = {
     "confluence",
@@ -91,6 +102,7 @@ class GraphState(TypedDict):
     memory_summary: NotRequired[str]
     memory_compressed_turns: NotRequired[int]
     memory_total_turns: NotRequired[int]
+    long_term_memories: NotRequired[list[dict[str, Any]]]
     route: NotRequired[str]
     rag_intent: NotRequired[str]
     source_hints: NotRequired[list[str]]
@@ -100,6 +112,9 @@ class GraphState(TypedDict):
     documents: NotRequired[list[Any]]
     steps: NotRequired[list[dict[str, Any]]]
     error: NotRequired[str | None]
+    request_id: NotRequired[str]
+    debug_id: NotRequired[str]
+    sse_events: NotRequired[list[dict[str, Any]]]
 
 
 ROUTER_SYSTEM_PROMPT = """你是一个请求路由器，只负责判断用户请求应该进入哪个系统链路。
@@ -121,8 +136,8 @@ ROUTER_SYSTEM_PROMPT = """你是一个请求路由器，只负责判断用户请
 - 用户要求删除、清空、重置、越权操作时，route 选择 unsafe_or_system。
 
 当 route 为 enterprise_knowledge 时，rag_intent 只能选择一个：
-basic, semantic, intra_document_reasoning, project_related, constrained,
-conflicting_info, completeness, high_level, info_not_found, unknown。
+fact_lookup, semantic_query, multi_hop, comparison, procedure, constrained,
+follow_up, not_enough_info, unknown。
 
 当 route 不是 enterprise_knowledge 时，rag_intent 必须是 unknown。
 
@@ -141,7 +156,7 @@ ROUTER_HUMAN_PROMPT = """用户问题：
 请返回如下 JSON：
 {{
   "route": "enterprise_knowledge | tool_action | chat | unsafe_or_system | clarify",
-  "rag_intent": "basic | semantic | intra_document_reasoning | project_related | constrained | conflicting_info | completeness | high_level | info_not_found | unknown",
+  "rag_intent": "fact_lookup | semantic_query | multi_hop | comparison | procedure | constrained | follow_up | not_enough_info | unknown",
   "source_hints": ["confluence"],
   "confidence": 0.0,
   "reason": "一句话说明"
@@ -170,6 +185,7 @@ class RouterGraph:
             | self.router_model
             | StrOutputParser()
         )
+        self.enterprise_rag_graph = EnterpriseRagGraph()
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -218,6 +234,7 @@ class RouterGraph:
             "memory_summary": "",
             "memory_compressed_turns": 0,
             "memory_total_turns": 0,
+            "long_term_memories": [],
             "route": "chat",
             "rag_intent": "unknown",
             "source_hints": [],
@@ -227,6 +244,9 @@ class RouterGraph:
             "documents": [],
             "steps": [],
             "error": None,
+            "request_id": str(uuid.uuid4()),
+            "debug_id": f"rag_dbg_{uuid.uuid4().hex}",
+            "sse_events": [],
         }
         result = await self.graph.ainvoke(state)
         log_perf(
@@ -239,6 +259,8 @@ class RouterGraph:
         return {
             "session_id": result.get("session_id"),
             "route": result.get("route", "chat"),
+            "request_id": result.get("request_id"),
+            "debug_id": result.get("debug_id"),
             "rag_intent": result.get("rag_intent", "unknown"),
             "source_hints": result.get("source_hints", []),
             "confidence": result.get("confidence", 0.0),
@@ -264,6 +286,7 @@ class RouterGraph:
             "memory_summary": "",
             "memory_compressed_turns": 0,
             "memory_total_turns": 0,
+            "long_term_memories": [],
             "route": "chat",
             "rag_intent": "unknown",
             "source_hints": [],
@@ -273,6 +296,9 @@ class RouterGraph:
             "documents": [],
             "steps": [],
             "error": None,
+            "request_id": str(uuid.uuid4()),
+            "debug_id": f"rag_dbg_{uuid.uuid4().hex}",
+            "sse_events": [],
         }
 
         try:
@@ -306,6 +332,8 @@ class RouterGraph:
                 {
                     "type": "route",
                     "session_id": state["session_id"],
+                    "request_id": state.get("request_id"),
+                    "debug_id": state.get("debug_id"),
                     "route": route,
                     "rag_intent": state.get("rag_intent", "unknown"),
                     "source_hints": state.get("source_hints", []),
@@ -321,8 +349,9 @@ class RouterGraph:
                         state["session_id"],
                         user_id,
                         history=state.get("history", []),
+                        long_term_memories=state.get("long_term_memories", []),
                     ):
-                        yield event
+                        yield self._sse_event_with_metadata(event, state)
                 finally:
                     log_perf("router.stream_total", stream_start, session_id=session_id, user_id=user_id, route=route)
                 return
@@ -335,8 +364,9 @@ class RouterGraph:
                         user_id,
                         tool_profile="full",
                         history=state.get("history", []),
+                        long_term_memories=state.get("long_term_memories", []),
                     ):
-                        yield event
+                        yield self._sse_event_with_metadata(event, state)
                 finally:
                     log_perf("router.stream_total", stream_start, session_id=session_id, user_id=user_id, route=route)
                 return
@@ -351,6 +381,9 @@ class RouterGraph:
                 state.update(await self.chat_node(state))
 
             answer = state.get("answer") or "抱歉，我无法理解您的请求。"
+            if route == "enterprise_knowledge":
+                for event in state.get("sse_events", []):
+                    yield self._sse_event(event)
             if answer and not state.get("error"):
                 await self.persist_message(state)
 
@@ -359,9 +392,18 @@ class RouterGraph:
                     "type": "response",
                     "content": answer,
                     "session_id": state["session_id"],
+                    "request_id": state.get("request_id"),
+                    "debug_id": state.get("debug_id"),
                 }
             )
-            yield self._sse_event({"type": "done", "session_id": state["session_id"]})
+            yield self._sse_event(
+                {
+                    "type": "done",
+                    "session_id": state["session_id"],
+                    "request_id": state.get("request_id"),
+                    "debug_id": state.get("debug_id"),
+                }
+            )
             log_perf("router.stream_total", stream_start, session_id=session_id, user_id=user_id, route=route)
         except Exception as exc:
             logger.error(f"【RouterGraph】流式路由执行失败: {exc}", exc_info=True)
@@ -381,6 +423,7 @@ class RouterGraph:
         memory_summary = ""
         memory_compressed_turns = 0
         memory_total_turns = 0
+        long_term_memories: list[dict[str, Any]] = []
 
         try:
             memory_context = await conversation_memory_service.get_memory_context(session_id, user_id)
@@ -397,12 +440,19 @@ class RouterGraph:
             except Exception as history_exc:
                 logger.warning(f"【RouterGraph】加载完整历史失败: {history_exc}")
 
+        try:
+            memories = await long_term_memory_service.search(state["query"], user_id)
+            long_term_memories = [memory.to_dict() for memory in memories]
+        except Exception as exc:
+            logger.warning(f"【RouterGraph】加载长期记忆失败，继续无长期记忆上下文: {exc}")
+
         return {
             "session_id": session_id,
             "history": history,
             "memory_summary": memory_summary,
             "memory_compressed_turns": memory_compressed_turns,
             "memory_total_turns": memory_total_turns,
+            "long_term_memories": long_term_memories,
         }
 
     async def llm_router(self, state: GraphState) -> dict[str, Any]:
@@ -444,7 +494,7 @@ class RouterGraph:
 
     async def validate_decision(self, state: GraphState) -> dict[str, Any]:
         route = self._normalize_route(state.get("route", "chat"))
-        rag_intent = state.get("rag_intent", "unknown")
+        rag_intent = self._normalize_rag_intent(state.get("rag_intent", "unknown"))
         confidence = self._normalize_confidence(state.get("confidence", 0.0))
         source_hints = [
             source for source in state.get("source_hints", []) if source in ALLOWED_SOURCE_HINTS
@@ -476,18 +526,26 @@ class RouterGraph:
 
     async def enterprise_knowledge_node(self, state: GraphState) -> dict[str, Any]:
         try:
-            result = await enterprise_rag_service.get_documents_and_summary(
-                query=state["query"],
+            request_id = state.get("request_id") or str(uuid.uuid4())
+            debug_id = state.get("debug_id") or f"rag_dbg_{uuid.uuid4().hex}"
+            rag_state = RagState(
+                request_id=request_id,
+                debug_id=debug_id,
+                session_id=state.get("session_id"),
+                user_id=state["user_id"],
+                original_query=state["query"],
+                current_query=state["query"],
                 rag_intent=state.get("rag_intent", "unknown"),
                 source_hints=state.get("source_hints", []),
                 router_confidence=state.get("confidence", 0.0),
+                router_reason=state.get("reason", ""),
+                memory_context=self._to_rag_memory_context(state.get("long_term_memories", [])),
             )
-            answer = result.get("summary", "抱歉，处理企业知识库请求时出现了错误。")
-            documents = result.get("documents", [])
-            strategy = result.get("strategy", {})
+            response = await self.enterprise_rag_graph.run(rag_state)
+            documents = [source.model_dump() for source in response.sources]
             steps = [
                 {
-                    "tool": "enterprise_knowledge",
+                    "tool": "enterprise_rag_graph",
                     "tool_input": {
                         "query": state["query"],
                         "rag_intent": state.get("rag_intent", "unknown"),
@@ -495,12 +553,21 @@ class RouterGraph:
                         "router_confidence": state.get("confidence", 0.0),
                     },
                     "tool_output": {
-                        "retrieved_documents": len(documents),
-                        "strategy": strategy,
+                        "debug_id": response.debug_id,
+                        "retrieved_documents": len(response.sources),
+                        "strategy": response.strategy.model_dump(),
+                        "evaluation": response.evaluation.model_dump() if response.evaluation else None,
                     },
                 }
             ]
-            return {"answer": answer, "documents": documents, "steps": steps}
+            return {
+                "answer": response.answer,
+                "documents": documents,
+                "steps": steps,
+                "debug_id": response.debug_id,
+                "request_id": response.request_id,
+                "sse_events": rag_state.sse_events,
+            }
         except Exception as exc:
             logger.error(f"【RouterGraph】企业知识库节点执行失败: {exc}", exc_info=True)
             return {"answer": "抱歉，知识库检索时出现了错误。", "error": f"enterprise_knowledge_error: {exc}"}
@@ -514,7 +581,11 @@ class RouterGraph:
 
     async def chat_node(self, state: GraphState) -> dict[str, Any]:
         try:
-            result = await get_chat_response(state["query"], state.get("history", []))
+            result = await get_chat_response(
+                state["query"],
+                state.get("history", []),
+                long_term_memories=state.get("long_term_memories", []),
+            )
             return {
                 "answer": result.get("response", "抱歉，处理对话时出现了错误。"),
                 "steps": result.get("steps", []),
@@ -551,6 +622,16 @@ class RouterGraph:
                     state["session_id"],
                     state["user_id"],
                 )
+                try:
+                    await long_term_memory_service.extract_and_store(
+                        user_id=state["user_id"],
+                        session_id=state["session_id"],
+                        user_message=state["query"],
+                        assistant_message=answer,
+                        source="chat",
+                    )
+                except Exception as memory_exc:
+                    logger.warning(f"【RouterGraph】抽取长期记忆失败: {memory_exc}")
         except Exception as exc:
             logger.warning(f"【RouterGraph】写入会话历史失败: {exc}")
         return {}
@@ -569,6 +650,7 @@ class RouterGraph:
                 state["query"],
                 state.get("history", []),
                 tool_profile=tool_profile,
+                long_term_memories=state.get("long_term_memories", []),
             )
             return {
                 "answer": result.get("response", fallback_answer),
@@ -577,6 +659,35 @@ class RouterGraph:
         except Exception as exc:
             logger.error(f"【RouterGraph】Agent节点执行失败: {exc}", exc_info=True)
             return {"answer": fallback_answer, "error": f"agent_error: {exc}"}
+
+    @staticmethod
+    def _to_rag_memory_context(memories: list[dict[str, Any]]) -> RagMemoryContext | None:
+        recalled: list[MemoryItem] = []
+        category_map = {
+            "preference": "user_preference",
+            "profile": "user_preference",
+            "project": "project_context",
+            "decision": "project_context",
+            "task": "project_context",
+            "assistant_output": "prior_question",
+            "other": "domain_term",
+        }
+        for memory in memories:
+            content = str(memory.get("memory") or memory.get("content") or "").strip()
+            if not content:
+                continue
+            memory_type = str(memory.get("memory_type") or memory.get("category") or "other")
+            recalled.append(
+                MemoryItem(
+                    memory_id=str(memory.get("id") or memory.get("memory_id") or f"memory-{len(recalled) + 1}"),
+                    content=content,
+                    category=category_map.get(memory_type, "domain_term"),
+                    relevance_score=RouterGraph._normalize_confidence(memory.get("score", 0.0)),
+                    source="long_term",
+                    created_at=memory.get("created_at"),
+                )
+            )
+        return RagMemoryContext(recalled=recalled) if recalled else None
 
     @staticmethod
     def _format_history_preview(history: list[tuple[str, str]], max_turns: int = 3) -> str:
@@ -603,12 +714,31 @@ class RouterGraph:
         return LEGACY_ROUTE_ALIASES.get(route_name, route_name)
 
     @staticmethod
+    def _normalize_rag_intent(rag_intent: Any) -> str:
+        intent = str(rag_intent or "unknown").strip()
+        normalized = LEGACY_RAG_INTENT_ALIASES.get(intent, intent)
+        return normalized if normalized in ALLOWED_RAG_INTENTS else "unknown"
+
+    @staticmethod
     def _normalize_confidence(value: Any) -> float:
         try:
             confidence = float(value)
         except (TypeError, ValueError):
             return 0.0
         return min(max(confidence, 0.0), 1.0)
+
+    def _sse_event_with_metadata(self, raw_event: str, state: GraphState) -> str:
+        prefix = "data: "
+        if not raw_event.startswith(prefix):
+            return raw_event
+        try:
+            payload = json.loads(raw_event.removeprefix(prefix).strip())
+        except json.JSONDecodeError:
+            return raw_event
+        payload.setdefault("session_id", state.get("session_id"))
+        payload.setdefault("request_id", state.get("request_id"))
+        payload.setdefault("debug_id", state.get("debug_id"))
+        return self._sse_event(payload)
 
     @staticmethod
     def _sse_event(payload: dict[str, Any]) -> str:

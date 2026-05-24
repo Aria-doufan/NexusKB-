@@ -1,4 +1,4 @@
-"""Index prepared EnterpriseRAG-Bench chunks into Chroma.
+"""Index prepared EnterpriseRAG-Bench parent-child chunks into Chroma.
 
 The script intentionally uses a separate default collection/persist directory
 from the app's original `rag_collection`, so benchmark experiments do not
@@ -21,9 +21,9 @@ from langchain_ollama import OllamaEmbeddings
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "chunks_structured_recursive.jsonl"
-DEFAULT_PERSIST_DIR = BACKEND_DIR / "data" / "chromadb_enterprise"
-DEFAULT_COLLECTION_NAME = "enterprise_rag_bench_structured_recursive"
+DEFAULT_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "child_chunks_parent_child.jsonl"
+DEFAULT_PERSIST_DIR = BACKEND_DIR / "data" / "chromadb_enterprise_parent_child"
+DEFAULT_COLLECTION_NAME = "enterprise_rag_bench_parent_child"
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 

@@ -1,4 +1,6 @@
 from fastapi import Request, HTTPException
+from redis.exceptions import RedisError
+from starlette.responses import JSONResponse
 
 from app.db.redis_config import connect_redis
 
@@ -19,27 +21,25 @@ def rate_limit(limit: int = 1, window: int = 60):
         # 生成限流键
         key = f"rate_limit:aichat:{client_ip}"
 
-        # 获取Redis连接
-        redis = await connect_redis()
-        
-        # 获取当前计数
-        current = await redis.get(key)
-        current = int(current) if current else 0
+        try:
+            redis = await connect_redis()
+            current = await redis.get(key)
+            current = int(current) if current else 0
 
-        if current >= limit:
-            # 限流触发
-            raise HTTPException(
-                status_code=429,
-                detail="请求过于频繁，请稍后再试"
-            )
+            if current >= limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail="请求过于频繁，请稍后再试"
+                )
 
-        # 增加计数
-        if current == 0:
-            # 第一次请求，设置过期时间
-            await redis.setex(key, window, 1)
-        else:
-            # 后续请求，增加计数
-            await redis.incr(key)
+            if current == 0:
+                await redis.setex(key, window, 1)
+            else:
+                await redis.incr(key)
+        except HTTPException:
+            raise
+        except (RedisError, OSError) as exc:
+            raise HTTPException(status_code=503, detail="Redis unavailable") from exc
 
     return dependency
 
@@ -57,6 +57,10 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if scope.get('path', '').startswith('/health'):
+            await self.app(scope, receive, send)
+            return
+
         # 构建请求对象
         from fastapi import Request
         request = Request(scope, receive)
@@ -69,29 +73,26 @@ class RateLimitMiddleware:
         # 生成限流键
         key = f"rate_limit:global:{client_ip}"
 
-        # 获取Redis连接
-        redis = await connect_redis()
-        
-        # 获取当前计数
-        current = await redis.get(key)
-        current = int(current) if current else 0
+        try:
+            redis = await connect_redis()
+            current = await redis.get(key)
+            current = int(current) if current else 0
 
-        if current >= self.limit:
-            # 限流触发
-            from starlette.responses import JSONResponse
-            response = JSONResponse(
-                {"detail": "请求过于频繁，请稍后再试"},
-                status_code=429
-            )
+            if current >= self.limit:
+                response = JSONResponse(
+                    {"detail": "请求过于频繁，请稍后再试"},
+                    status_code=429
+                )
+                await response(scope, receive, send)
+                return
+
+            if current == 0:
+                await redis.setex(key, self.window, 1)
+            else:
+                await redis.incr(key)
+        except (RedisError, OSError):
+            response = JSONResponse({"detail": "Redis unavailable"}, status_code=503)
             await response(scope, receive, send)
             return
-
-        # 增加计数
-        if current == 0:
-            # 第一次请求，设置过期时间
-            await redis.setex(key, self.window, 1)
-        else:
-            # 后续请求，增加计数
-            await redis.incr(key)
 
         await self.app(scope, receive, send)

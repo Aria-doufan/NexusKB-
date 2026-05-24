@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from jose import JWTError, jwt
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from redis.exceptions import RedisError
 
 from app.core.failed_response import logger
 from app.db.redis_config import connect_redis, set_redis_cache
@@ -62,15 +63,18 @@ async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depend
     jti = payload.get("jti")
     logger.info(f"【debug】 检查JWT是否在黑名单中，jti: {jti}", extra={"path": "auth_utils.get_current_user_id"})
     if jti:
-        redis_client = await connect_redis()
-        # 使用通配符查询所有可能的黑名单键格式
-        # 匹配任何前缀的blacklist键，如:1:blacklist:{jti}、blacklist:{jti}等
-        wildcard_pattern = f"*blacklist:{jti}"
-        
-        # 获取所有匹配的键
-        matching_keys = await redis_client.keys(wildcard_pattern)
-        logger.info(f"【debug】 检查JWT是否在黑名单中，匹配的键: {matching_keys}", extra={"path": "auth_utils.get_current_user_id"})
-        
+        try:
+            redis_client = await connect_redis()
+            # 使用通配符查询所有可能的黑名单键格式
+            # 匹配任何前缀的blacklist键，如:1:blacklist:{jti}、blacklist:{jti}等
+            wildcard_pattern = f"*blacklist:{jti}"
+
+            # 获取所有匹配的键
+            matching_keys = await redis_client.keys(wildcard_pattern)
+            logger.info(f"【debug】 检查JWT是否在黑名单中，匹配的键: {matching_keys}", extra={"path": "auth_utils.get_current_user_id"})
+        except (RedisError, OSError) as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis unavailable") from exc
+
         # 如果有匹配的键，说明JWT在黑名单中
         if matching_keys:
             raise HTTPException(

@@ -1,59 +1,32 @@
 <template>
-  <div class="login-page">
-    <van-nav-bar
-      title="用户登录"
-      left-arrow
-      @click-left="onClickLeft"
-      fixed
-    />
-    
-    <div class="login-container">
-      <div class="login-logo">
-        <van-image
-          width="80"
-          height="80"
-          src="https://fastly.jsdelivr.net/npm/@vant/assets/cat.jpeg"
-          round
-        />
-        <h2>用户登录</h2>
+  <div class="auth-page">
+    <section class="auth-brand-panel">
+      <RouterLink to="/aichat" class="auth-brand">NexusKB</RouterLink>
+      <h1>企业知识问答驾驶舱</h1>
+      <p>通过可靠检索、多轮记忆和引用溯源，把内部文档转化为可信答案。</p>
+      <div class="auth-capabilities">
+        <span>可靠检索</span>
+        <span>多轮记忆</span>
+        <span>引用溯源</span>
       </div>
-      
-      <van-form @submit="onSubmit" class="login-form">
-        <van-cell-group inset>
-          <van-field
-            v-model="username"
-            name="username"
-            label="用户名"
-            placeholder="请输入用户名"
-            :rules="[{ required: true, message: '请填写用户名' }]"
-          />
-          <van-field
-            v-model="password"
-            type="password"
-            name="password"
-            label="密码"
-            placeholder="请输入密码"
-            :rules="[{ required: true, message: '请填写密码' }]"
-          />
-        </van-cell-group>
-        
-        <div class="submit-btn">
-          <van-button round block type="primary" native-type="submit" size="large">
-            登录
-          </van-button>
-        </div>
-        
-        <div class="register-link">
-          还没有账号？<span @click="goToRegister">去注册</span>
-        </div>
+    </section>
+
+    <section class="auth-card enterprise-card">
+      <p class="shell-eyebrow">Welcome back</p>
+      <h2>登录 NexusKB</h2>
+      <van-form @submit="onSubmit" class="auth-form">
+        <van-field v-model="username" name="username" label="用户名" placeholder="请输入用户名" :rules="[{ required: true, message: '请填写用户名' }]" />
+        <van-field v-model="password" type="password" name="password" label="密码" placeholder="请输入密码" :rules="[{ required: true, message: '请填写密码' }]" />
+        <button class="enterprise-button auth-submit" type="submit">登录</button>
       </van-form>
-    </div>
+      <p class="auth-switch">还没有账号？<button @click="goToRegister">去注册</button></p>
+    </section>
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, RouterLink } from 'vue-router';
 import { showToast } from 'vant';
 import { useUserStore } from '../store/user';
 
@@ -71,20 +44,20 @@ const onSubmit = async (values) => {
     forbidClick: true,
     duration: 0
   });
-  
+
   try {
     // 调用API登录
     const result = await userStore.login({
       username: username.value,
       password: password.value
     });
-    
+
     if (result.success) {
       showToast({
         type: 'success',
         message: result.message
       });
-      
+
       router.push('/');
     } else {
       showToast({
@@ -100,67 +73,116 @@ const onSubmit = async (values) => {
   }
 };
 
-const onClickLeft = () => {
-  router.back();
-};
-
 const goToRegister = () => {
   router.push('/register');
 };
 </script>
 
 <style scoped>
-.login-page {
+.auth-page {
   min-height: 100vh;
-  background-color: #f7f8fa;
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(380px, 1.05fr);
+  background: radial-gradient(circle at 20% 10%, rgba(147, 197, 253, 0.4), transparent 30%), linear-gradient(135deg, #eff6ff 0%, #f8fafc 48%, #ffffff 100%);
 }
 
-.login-container {
-  padding-top: 56px;
+.auth-brand-panel {
+  padding: 72px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, #1e3a8a 0%, #2563eb 100%);
+  color: #fff;
 }
 
-.login-logo {
-  margin: 40px 0;
-  text-align: center;
-}
-
-.login-logo h2 {
-  margin-top: 16px;
-  color: #323233;
+.auth-brand {
+  color: #fff;
+  text-decoration: none;
   font-size: 22px;
+  font-weight: 800;
 }
 
-.login-form {
+.auth-brand-panel h1 {
+  margin: 36px 0 18px;
+  font-size: clamp(36px, 5vw, 58px);
+  line-height: 1.05;
+}
+
+.auth-brand-panel p {
+  margin: 0;
+  max-width: 560px;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 18px;
+}
+
+.auth-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.auth-capabilities span {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.auth-card {
+  align-self: center;
+  justify-self: center;
+  width: min(460px, calc(100% - 48px));
+  padding: 34px;
+}
+
+.shell-eyebrow {
+  margin: 0 0 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.auth-card h2 {
+  margin: 0 0 24px;
+  font-size: 30px;
+}
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+}
+
+.auth-submit {
   width: 100%;
-  padding: 0 16px;
+  margin-top: 4px;
+  min-height: 44px;
 }
 
-.submit-btn {
-  margin: 24px 16px;
-}
-
-.login-tips {
+.auth-switch {
+  margin: 22px 0 0;
   text-align: center;
-  color: #969799;
-  font-size: 14px;
-  margin-top: 16px;
+  color: var(--color-muted);
 }
 
-.login-tips p {
-  margin: 8px 0;
+.auth-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  cursor: pointer;
 }
 
-.register-link {
-  text-align: center;
-  margin-top: 24px;
-  color: #969799;
-  font-size: 14px;
-}
+@media (max-width: 860px) {
+  .auth-page {
+    grid-template-columns: 1fr;
+  }
 
-.register-link span {
-  color: #1989fa;
+  .auth-brand-panel {
+    padding: 42px 28px;
+  }
+
+  .auth-card {
+    margin: 32px 0;
+  }
 }
 </style>

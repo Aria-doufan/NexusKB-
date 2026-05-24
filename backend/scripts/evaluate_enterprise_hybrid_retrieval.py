@@ -21,7 +21,7 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -43,6 +43,9 @@ TOKEN_PATTERN = re.compile(r"[a-z0-9_.$%/-]+")
 SOURCE_HINT_SOFT_BOOST = 0.15
 COMPLEX_QUESTION_TYPES = {
     "semantic",
+    "semantic_query",
+    "multi_hop",
+    "comparison",
     "intra_document_reasoning",
     "project_related",
     "constrained",
@@ -61,6 +64,7 @@ METHODS = [
     "chroma_bm25_rrf_source_boost",
     "chroma_bm25_rrf_reranker",
     "strategy_matrix",
+    "strategy_matrix_decompose",
     "hybrid_bm25_rrf",
     "hybrid_bm25_rrf_reranker",
 ]
@@ -75,6 +79,7 @@ class Question:
     expected_doc_ids: list[str]
     gold_answer: str
     answer_facts: list[str]
+    required_evidence_groups: list[list[str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -210,6 +215,17 @@ def load_questions(path: Path, limit: int | None = None) -> list[Question]:
             if limit is not None and len(questions) >= limit:
                 break
             row = json.loads(line)
+            required_evidence_groups = []
+            for group in row.get("required_evidence_groups") or []:
+                if not isinstance(group, list):
+                    continue
+                normalized_group = [
+                    str(chunk_id).strip()
+                    for chunk_id in group
+                    if chunk_id is not None and str(chunk_id).strip()
+                ]
+                if normalized_group:
+                    required_evidence_groups.append(normalized_group)
             questions.append(
                 Question(
                     question_id=row["question_id"],
@@ -219,6 +235,7 @@ def load_questions(path: Path, limit: int | None = None) -> list[Question]:
                     expected_doc_ids=list(row.get("expected_doc_ids") or []),
                     gold_answer=row.get("gold_answer", ""),
                     answer_facts=list(row.get("answer_facts") or []),
+                    required_evidence_groups=required_evidence_groups,
                 )
             )
     return questions
@@ -244,20 +261,28 @@ def method_needs_bm25(method: str) -> bool:
 
 
 def method_needs_reranker(method: str) -> bool:
-    return normalize_method(method) in {"chroma_bm25_rrf_reranker", "strategy_matrix"}
+    return normalize_method(method) in {
+        "chroma_bm25_rrf_reranker",
+        "strategy_matrix",
+        "strategy_matrix_decompose",
+    }
 
 
 def should_rerank_question(method: str, question: Question) -> bool:
     normalized = normalize_method(method)
     if normalized == "chroma_bm25_rrf_reranker":
         return True
-    if normalized == "strategy_matrix":
+    if normalized in {"strategy_matrix", "strategy_matrix_decompose"}:
         return question.question_type in COMPLEX_QUESTION_TYPES
     return False
 
 
 def should_apply_source_boost(method: str) -> bool:
-    return normalize_method(method) in {"chroma_bm25_rrf_source_boost", "strategy_matrix"}
+    return normalize_method(method) in {
+        "chroma_bm25_rrf_source_boost",
+        "strategy_matrix",
+        "strategy_matrix_decompose",
+    }
 
 
 class ChildChunkBM25:
@@ -385,6 +410,31 @@ def reciprocal_rank(ranked_doc_ids: list[str], expected_doc_ids: set[str], max_k
     return 0.0
 
 
+def evidence_coverage_at_k(
+    ranked_chunk_ids: list[str],
+    required_evidence_groups: list[list[str]],
+    max_k: int,
+) -> float:
+    if not required_evidence_groups:
+        return 0.0
+    top_ids = set(ranked_chunk_ids[:max_k])
+    covered = 0
+    for group in required_evidence_groups:
+        if top_ids.intersection(group):
+            covered += 1
+    return covered / len(required_evidence_groups)
+
+
+def decompose_question_for_eval(question: Question) -> list[str]:
+    if question.question_type not in {"multi_hop", "comparison"}:
+        return [question.question]
+    answer_facts = [fact.strip() for fact in question.answer_facts if fact.strip()]
+    if answer_facts:
+        return answer_facts[:4]
+    return [question.question]
+
+
+
 def fuse_by_rrf(
     vector_candidates: Iterable[Candidate],
     bm25_candidates: Iterable[Candidate],
@@ -442,6 +492,37 @@ def dedup_parent_doc_ids(candidates: list[Candidate]) -> tuple[list[str], list[C
         ranked_doc_ids.append(candidate.parent_doc_id)
         hits.append(candidate)
     return ranked_doc_ids, hits
+
+
+def ranked_chunk_ids_for_coverage(
+    ranked_candidates: list[Candidate],
+    parent_candidates: list[Candidate],
+    reranker_used: bool,
+) -> list[str]:
+    if not reranker_used:
+        return [candidate.chunk_id for candidate in ranked_candidates if candidate.chunk_id]
+
+    ranked_parent_doc_ids = {candidate.parent_doc_id for candidate in parent_candidates}
+    seen_chunk_ids: set[str] = set()
+    ranked_chunk_ids: list[str] = []
+
+    for candidate in parent_candidates:
+        if candidate.chunk_id:
+            ranked_chunk_ids.append(candidate.chunk_id)
+            seen_chunk_ids.add(candidate.chunk_id)
+
+    for candidate in ranked_candidates:
+        if (
+            not candidate.parent_doc_id
+            or candidate.parent_doc_id not in ranked_parent_doc_ids
+            or not candidate.chunk_id
+            or candidate.chunk_id in seen_chunk_ids
+        ):
+            continue
+        ranked_chunk_ids.append(candidate.chunk_id)
+        seen_chunk_ids.add(candidate.chunk_id)
+
+    return ranked_chunk_ids
 
 
 def maybe_load_reranker(model_path: str, device: str | None, max_length: int) -> Any:
@@ -517,28 +598,59 @@ def evaluate_question(
     vector_candidates: list[Candidate] = []
     bm25_candidates: list[Candidate] = []
 
-    if method_needs_chroma(normalized_method):
+    if normalized_method == "strategy_matrix_decompose" and question.question_type in {"multi_hop", "comparison"}:
         if store is None:
             raise ValueError(f"Method {method} requires Chroma, but store is not initialized")
-        vector_candidates = chroma_search(store, question.question, chroma_search_k, where)
-
-    if method_needs_bm25(normalized_method):
         if bm25 is None:
             raise ValueError(f"Method {method} requires BM25, but index is not initialized")
-        bm25_candidates = bm25.search(question.question, bm25_search_k)
 
-    if normalized_method == "chroma_only":
-        ranked_candidates = vector_candidates
-    elif normalized_method == "bm25_only":
-        ranked_candidates = bm25_candidates
-    else:
-        ranked_candidates = fuse_by_rrf(
-            vector_candidates=vector_candidates,
-            bm25_candidates=bm25_candidates,
-            rrf_k=rrf_k,
-            source_hints=question.source_types if should_apply_source_boost(normalized_method) else None,
-            source_boost=source_boost,
+        merged_by_chunk_id: dict[str, Candidate] = {}
+        for sub_query in decompose_question_for_eval(question):
+            sub_vector_candidates = chroma_search(store, sub_query, chroma_search_k, where)
+            sub_bm25_candidates = bm25.search(sub_query, bm25_search_k)
+            vector_candidates.extend(sub_vector_candidates)
+            bm25_candidates.extend(sub_bm25_candidates)
+            sub_ranked_candidates = fuse_by_rrf(
+                vector_candidates=sub_vector_candidates,
+                bm25_candidates=sub_bm25_candidates,
+                rrf_k=rrf_k,
+                source_hints=question.source_types,
+                source_boost=source_boost,
+            )
+            for candidate in sub_ranked_candidates:
+                if not candidate.chunk_id:
+                    continue
+                existing = merged_by_chunk_id.get(candidate.chunk_id)
+                if existing is None or candidate.fused_score > existing.fused_score:
+                    merged_by_chunk_id[candidate.chunk_id] = candidate
+        ranked_candidates = sorted(
+            merged_by_chunk_id.values(),
+            key=lambda item: item.fused_score,
+            reverse=True,
         )
+    else:
+        if method_needs_chroma(normalized_method):
+            if store is None:
+                raise ValueError(f"Method {method} requires Chroma, but store is not initialized")
+            vector_candidates = chroma_search(store, question.question, chroma_search_k, where)
+
+        if method_needs_bm25(normalized_method):
+            if bm25 is None:
+                raise ValueError(f"Method {method} requires BM25, but index is not initialized")
+            bm25_candidates = bm25.search(question.question, bm25_search_k)
+
+        if normalized_method == "chroma_only":
+            ranked_candidates = vector_candidates
+        elif normalized_method == "bm25_only":
+            ranked_candidates = bm25_candidates
+        else:
+            ranked_candidates = fuse_by_rrf(
+                vector_candidates=vector_candidates,
+                bm25_candidates=bm25_candidates,
+                rrf_k=rrf_k,
+                source_hints=question.source_types if should_apply_source_boost(normalized_method) else None,
+                source_boost=source_boost,
+            )
 
     ranked_doc_ids, parent_candidates = dedup_parent_doc_ids(ranked_candidates)
     reranker_used = reranker_model is not None and should_rerank_question(normalized_method, question)
@@ -557,6 +669,12 @@ def evaluate_question(
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     expected = set(question.expected_doc_ids)
     max_k = max(k_values)
+    ranked_chunk_ids = ranked_chunk_ids_for_coverage(
+        ranked_candidates=ranked_candidates,
+        parent_candidates=parent_candidates,
+        reranker_used=reranker_used,
+    )
+    required_evidence_groups_count = len(question.required_evidence_groups)
 
     detail: dict[str, Any] = {
         "method": method,
@@ -567,6 +685,13 @@ def evaluate_question(
         "question": question.question,
         "expected_doc_ids": question.expected_doc_ids,
         "retrieved_parent_doc_ids": ranked_doc_ids,
+        "retrieved_chunk_ids": ranked_chunk_ids[:max_k],
+        "required_evidence_groups_count": required_evidence_groups_count,
+        "evidence_coverage": evidence_coverage_at_k(
+            ranked_chunk_ids,
+            question.required_evidence_groups,
+            max_k,
+        ),
         "top_hits": [
             candidate_to_hit(candidate, rank)
             for rank, candidate in enumerate(parent_candidates[: max(k_values)], start=1)
@@ -591,6 +716,11 @@ def evaluate_question(
         detail[f"recall@{k}"] = recall
         detail[f"f1@{k}"] = f1
         detail[f"matched_doc_ids@{k}"] = matched
+        detail[f"evidence_coverage@{k}"] = evidence_coverage_at_k(
+            ranked_chunk_ids,
+            question.required_evidence_groups,
+            k,
+        )
 
     detail[f"rr@{max_k}"] = reciprocal_rank(ranked_doc_ids, expected, max_k)
     return detail
@@ -598,6 +728,10 @@ def evaluate_question(
 
 def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, Any]:
     total = len(details)
+    evidence_coverage_details = [
+        item for item in details if item.get("required_evidence_groups_count", 0) > 0
+    ]
+    evidence_coverage_questions = len(evidence_coverage_details)
     summary: dict[str, Any] = {
         "questions": total,
         "k_values": k_values,
@@ -605,6 +739,12 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
             sum(item["latency_ms"] for item in details) / max(total, 1),
             2,
         ),
+        "evidence_coverage": round(
+            sum(item.get("evidence_coverage", 0.0) for item in evidence_coverage_details)
+            / max(evidence_coverage_questions, 1),
+            4,
+        ),
+        "evidence_coverage_questions": evidence_coverage_questions,
     }
 
     for k in k_values:
@@ -622,6 +762,11 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
         )
         summary[f"f1@{k}"] = round(
             sum(item[f"f1@{k}"] for item in details) / max(total, 1),
+            4,
+        )
+        summary[f"evidence_coverage@{k}"] = round(
+            sum(item.get(f"evidence_coverage@{k}", 0.0) for item in evidence_coverage_details)
+            / max(evidence_coverage_questions, 1),
             4,
         )
 
@@ -709,6 +854,8 @@ def write_outputs(
         "top_parent_doc_ids",
         "latency_ms",
         "dedup_parent_results",
+        "required_evidence_groups_count",
+        "evidence_coverage",
         "reranker_used",
         "source_boost_applied",
     ]
@@ -719,6 +866,7 @@ def write_outputs(
                 f"precision@{k}",
                 f"recall@{k}",
                 f"f1@{k}",
+                f"evidence_coverage@{k}",
                 f"matched_doc_ids@{k}",
             ]
         )
@@ -738,6 +886,8 @@ def write_outputs(
                 "top_parent_doc_ids": "|".join(row["retrieved_parent_doc_ids"][: max(k_values)]),
                 "latency_ms": row["latency_ms"],
                 "dedup_parent_results": row["dedup_parent_results"],
+                "required_evidence_groups_count": row.get("required_evidence_groups_count", 0),
+                "evidence_coverage": row.get("evidence_coverage", 0.0),
                 "reranker_used": row["reranker_used"],
                 "source_boost_applied": row["source_boost_applied"],
                 f"rr@{max(k_values)}": row[f"rr@{max(k_values)}"],
@@ -747,6 +897,7 @@ def write_outputs(
                 csv_row[f"precision@{k}"] = row[f"precision@{k}"]
                 csv_row[f"recall@{k}"] = row[f"recall@{k}"]
                 csv_row[f"f1@{k}"] = row[f"f1@{k}"]
+                csv_row[f"evidence_coverage@{k}"] = row.get(f"evidence_coverage@{k}", 0.0)
                 csv_row[f"matched_doc_ids@{k}"] = "|".join(row[f"matched_doc_ids@{k}"])
             writer.writerow(csv_row)
 
@@ -835,7 +986,7 @@ def main() -> None:
             "reranker_candidate_k": args.reranker_candidate_k if reranker_model is not None else None,
             "reranker_batch_size": args.reranker_batch_size if reranker_model is not None else None,
             "reranker_complex_question_types": sorted(COMPLEX_QUESTION_TYPES)
-            if normalized_method == "strategy_matrix"
+            if normalized_method in {"strategy_matrix", "strategy_matrix_decompose"}
             else None,
             "failures": len(failures),
             "elapsed_sec": round(time.perf_counter() - started, 2),

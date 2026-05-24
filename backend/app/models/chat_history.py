@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 
@@ -46,3 +46,22 @@ class ChatSessionMemory(Base):
     summarized_turn_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LongTermMemory(Base):
+    __tablename__ = "long_term_memories"
+
+    id = Column(String(64), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=False)
+    session_id = Column(String(64), index=True, nullable=False)
+    memory = Column(Text, nullable=False)
+    memory_type = Column(String(32), index=True, nullable=False)
+    source = Column(String(32), nullable=False, default="chat")
+    source_message_ids = Column(JSON, nullable=False, default=list)
+    hash = Column(String(64), index=True, nullable=False)
+    metadata_ = Column(JSON, name="metadata")
+    score = Column(Float, nullable=False, default=0.0)
+    status = Column(String(32), index=True, nullable=False, default="active")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
