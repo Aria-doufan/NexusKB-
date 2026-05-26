@@ -99,6 +99,10 @@ class RetrievalAttempt(BaseModel):
     reranked_results: list[RagCandidate] = Field(default_factory=list)
     selected_documents: list[RagDocument] = Field(default_factory=list)
     elapsed_ms: float = Field(default=0.0, ge=0.0)
+    dense_ms: float | None = Field(default=None, ge=0.0)
+    bm25_ms: float | None = Field(default=None, ge=0.0)
+    rrf_ms: float | None = Field(default=None, ge=0.0)
+    rerank_ms: float | None = Field(default=None, ge=0.0)
     reason: str = ""
 
 
@@ -151,9 +155,12 @@ class RagSource(BaseModel):
 
 class RagStrategySummary(BaseModel):
     strategy_name: str
+    query_type: str = "unknown"
     retrieval_mode: str
     final_top_k: int = Field(ge=0)
     use_reranker: bool = False
+    use_query_rewrite: bool = False
+    use_decompose: bool = False
     retry_count: int = Field(default=0, ge=0)
 
 
@@ -167,6 +174,16 @@ class EvaluationSummary(BaseModel):
 class RagMetrics(BaseModel):
     retry_count: int = Field(default=0, ge=0)
     retrieval_attempts: int = Field(default=0, ge=0)
+    route_ms: float | None = Field(default=None, ge=0.0)
+    planning_ms: float | None = Field(default=None, ge=0.0)
+    strategy_ms: float | None = Field(default=None, ge=0.0)
+    dense_ms: float | None = Field(default=None, ge=0.0)
+    bm25_ms: float | None = Field(default=None, ge=0.0)
+    rrf_ms: float | None = Field(default=None, ge=0.0)
+    rerank_ms: float | None = Field(default=None, ge=0.0)
+    retrieval_ms: float | None = Field(default=None, ge=0.0)
+    evaluation_ms: float | None = Field(default=None, ge=0.0)
+    generation_ms: float | None = Field(default=None, ge=0.0)
     total_ms: float | None = Field(default=None, ge=0.0)
 
 

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
 
-from app.rag.decomposition import decompose_query, merge_decomposed_scores, should_decompose_intent
+from app.rag.decomposition import decompose_query, merge_decomposed_scores
 from app.schemas.rag import (
     EvaluationResult,
     RagDocument,
@@ -13,7 +13,6 @@ from app.schemas.rag import (
     RagState,
     RagStrategyConfig,
     RagStrategySummary,
-    RetrievalAttempt,
     SubQuery as RagSubQuery,
 )
 from app.schemas.rag_debug import (
@@ -29,12 +28,22 @@ from app.services.rag_debug_trace_store import debug_trace_store
 
 
 class EnterpriseRagGraph:
-    def __init__(self, service=None, trace_store=None):
+    def __init__(self, service=None, trace_store=None, strategy_router=None, retrieval_pipeline=None):
         if service is None:
             from app.rag.enterprise_rag_service import enterprise_rag_service
 
             service = enterprise_rag_service
+        if strategy_router is None:
+            from app.rag.strategy_router import strategy_router as default_strategy_router
+
+            strategy_router = default_strategy_router
+        if retrieval_pipeline is None:
+            from app.rag.retrieval_pipeline import RetrievalPipeline
+
+            retrieval_pipeline = RetrievalPipeline(service)
         self.service = service
+        self.strategy_router = strategy_router
+        self.retrieval_pipeline = retrieval_pipeline
         self.trace_store = trace_store or debug_trace_store
 
     async def run(self, state: RagState) -> RagResponse:
@@ -98,38 +107,13 @@ class EnterpriseRagGraph:
         self._record_event(state, "rag_plan_created", "planner", data=state.plan.model_dump())
 
     def strategy_select(self, state: RagState, trace: RagDebugTrace) -> None:
-        final_top_k = self._final_top_k_for_intent(state.rag_intent)
-        search_k = self._search_k_for_intent(state.rag_intent)
-        task_type = state.plan.task_type if state.plan else self._task_type_for_intent(state.rag_intent, state.original_query)
-        use_reranker = state.rag_intent in {
-            "semantic_query",
-            "multi_hop",
-            "comparison",
-            "constrained",
-            "semantic",
-            "intra_document_reasoning",
-            "project_related",
-            "conflicting_info",
-            "completeness",
-            "high_level",
-        } or state.router_confidence < 0.65
-        state.strategy = RagStrategyConfig(
-            strategy_name=state.rag_intent if state.rag_intent != "unknown" else "default",
-            retrieval_mode="hybrid",
-            top_k_dense=search_k,
-            top_k_bm25=search_k,
-            fusion_top_k=search_k,
-            final_top_k=final_top_k,
-            use_reranker=use_reranker,
-            use_query_rewrite=False,
-            use_decompose=should_decompose_intent(task_type),
-            allow_expand_top_k=True,
-            max_retries=state.max_retries,
-            metadata_filters={"source_hints": state.source_hints},
-            fallback_policy="insufficient_evidence",
+        strategy = self.strategy_router.select(state)
+        state.strategy = strategy
+        trace.strategy = RagStrategyTrace(
+            strategy=strategy,
+            reason="Selected by StrategyRouter from rag_intent and router confidence.",
         )
-        trace.strategy = RagStrategyTrace(strategy=state.strategy, reason="Selected from router intent and confidence.")
-        self._record_event(state, "strategy_selected", "strategy_select", data=state.strategy.model_dump())
+        self._record_event(state, "strategy_selected", "strategy_select", data=strategy.model_dump())
 
     async def retrieve(self, state: RagState, trace: RagDebugTrace, reason: str = "Initial hybrid retrieval.") -> None:
         strategy = state.strategy or RagStrategyConfig()
@@ -137,40 +121,30 @@ class EnterpriseRagGraph:
             await self.retrieve_decomposed(state, trace, reason)
             return
 
-        started = perf_counter()
+        attempt_id = len(state.retrieval_attempts) + 1
         self._record_event(
             state,
             "retrieval_started",
             "retrieve",
-            data={"attempt_id": len(state.retrieval_attempts) + 1, "query": state.current_query},
+            data={"attempt_id": attempt_id, "query": state.current_query},
         )
-        raw_documents = await self.service.retrieve(
+        result = await self.retrieval_pipeline.run(
             query=state.current_query,
-            k=strategy.final_top_k,
-            search_k=strategy.fusion_top_k,
+            strategy=strategy,
             source_hints=state.source_hints,
-            strict_source_filter=False,
             rag_intent=state.rag_intent,
             router_confidence=state.router_confidence,
-            use_reranker=strategy.use_reranker,
-        )
-        selected_documents = [self._to_rag_document(document) for document in raw_documents]
-        state.selected_documents = selected_documents
-        attempt = RetrievalAttempt(
-            attempt_id=len(state.retrieval_attempts) + 1,
-            query=state.current_query,
-            strategy_name=strategy.strategy_name,
-            selected_documents=selected_documents,
-            elapsed_ms=(perf_counter() - started) * 1000,
+            attempt_id=attempt_id,
             reason=reason,
         )
-        state.retrieval_attempts.append(attempt)
-        trace.retrieval_attempts.append(RetrievalAttemptTrace(attempt=attempt))
+        state.selected_documents = result.selected_documents
+        state.retrieval_attempts.append(result.attempt)
+        trace.retrieval_attempts.append(RetrievalAttemptTrace(attempt=result.attempt))
         self._record_event(
             state,
             "retrieval_finished",
             "retrieve",
-            data={"attempt_id": attempt.attempt_id, "selected_documents": len(selected_documents)},
+            data=self._retrieval_event_data(result, sub_query_id=None),
         )
 
     async def retrieve_decomposed(self, state: RagState, trace: RagDebugTrace, reason: str) -> None:
@@ -213,7 +187,6 @@ class EnterpriseRagGraph:
         sub_query_rankings: dict[str, dict[str, float]] = {}
         sub_query_text_by_id = {sub_query.id: sub_query.query for sub_query in sub_query_plan.sub_queries}
         for sub_query in sub_query_plan.sub_queries:
-            started = perf_counter()
             attempt_id = len(state.retrieval_attempts) + 1
             self._record_event(
                 state,
@@ -221,43 +194,29 @@ class EnterpriseRagGraph:
                 "retrieve",
                 data={"attempt_id": attempt_id, "sub_query_id": sub_query.id, "query": sub_query.query},
             )
-            raw_documents = await self.service.retrieve(
+            result = await self.retrieval_pipeline.run(
                 query=sub_query.query,
-                k=strategy.final_top_k,
-                search_k=strategy.fusion_top_k,
+                strategy=strategy,
                 source_hints=state.source_hints,
-                strict_source_filter=False,
                 rag_intent=state.rag_intent,
                 router_confidence=state.router_confidence,
-                use_reranker=strategy.use_reranker,
+                attempt_id=attempt_id,
+                sub_query_id=sub_query.id,
+                reason=reason,
             )
-            selected_documents = [self._to_rag_document(document) for document in raw_documents]
             ranking: dict[str, float] = {}
-            for rank, document in enumerate(selected_documents, start=1):
+            for rank, document in enumerate(result.selected_documents, start=1):
                 key = document.parent_chunk_id or document.source_id
                 documents_by_key.setdefault(key, document)
                 ranking[key] = document.score or 1.0 / rank
             sub_query_rankings[sub_query.id] = ranking
-            attempt = RetrievalAttempt(
-                attempt_id=attempt_id,
-                query=sub_query.query,
-                sub_query_id=sub_query.id,
-                strategy_name=strategy.strategy_name,
-                selected_documents=selected_documents,
-                elapsed_ms=(perf_counter() - started) * 1000,
-                reason=reason,
-            )
-            state.retrieval_attempts.append(attempt)
-            trace.retrieval_attempts.append(RetrievalAttemptTrace(attempt=attempt))
+            state.retrieval_attempts.append(result.attempt)
+            trace.retrieval_attempts.append(RetrievalAttemptTrace(attempt=result.attempt))
             self._record_event(
                 state,
                 "retrieval_finished",
                 "retrieve",
-                data={
-                    "attempt_id": attempt.attempt_id,
-                    "sub_query_id": sub_query.id,
-                    "selected_documents": len(selected_documents),
-                },
+                data=self._retrieval_event_data(result, sub_query_id=sub_query.id),
             )
 
         merged_scores = merge_decomposed_scores(sub_query_rankings, total_sub_queries=len(sub_query_plan.sub_queries))
@@ -419,9 +378,12 @@ class EnterpriseRagGraph:
             sources=state.sources,
             strategy=RagStrategySummary(
                 strategy_name=strategy.strategy_name,
+                query_type=state.rag_intent,
                 retrieval_mode=strategy.retrieval_mode,
                 final_top_k=strategy.final_top_k,
                 use_reranker=strategy.use_reranker,
+                use_query_rewrite=strategy.use_query_rewrite,
+                use_decompose=strategy.use_decompose,
                 retry_count=state.retry_count,
             ),
             evaluation=None
@@ -432,12 +394,44 @@ class EnterpriseRagGraph:
                 "missing_aspects": evaluation.missing_aspects,
                 "user_visible_reason": evaluation.user_visible_reason or None,
             },
-            metrics=RagMetrics(
-                retry_count=state.retry_count,
-                retrieval_attempts=len(state.retrieval_attempts),
-                total_ms=total_ms,
-            ),
+            metrics=self._aggregate_metrics(state, trace, total_ms),
             warnings=state.warnings,
+        )
+
+    def _retrieval_event_data(self, result, sub_query_id: str | None) -> dict[str, Any]:
+        data = {
+            "attempt_id": result.attempt.attempt_id,
+            "selected_documents": len(result.selected_documents),
+            "dense_candidates": len(result.attempt.dense_results),
+            "bm25_candidates": len(result.attempt.bm25_results),
+            "fused_candidates": len(result.attempt.fused_results),
+            "reranked_candidates": len(result.attempt.reranked_results),
+            "dense_ms": result.metrics.dense_ms,
+            "bm25_ms": result.metrics.bm25_ms,
+            "rrf_ms": result.metrics.rrf_ms,
+            "rerank_ms": result.metrics.rerank_ms,
+            "total_ms": result.metrics.total_ms,
+        }
+        if sub_query_id:
+            data["sub_query_id"] = sub_query_id
+        return data
+
+    def _aggregate_metrics(self, state: RagState, trace: RagDebugTrace, total_ms: float) -> RagMetrics:
+        dense_ms = sum((attempt.dense_ms or 0.0) for attempt in state.retrieval_attempts)
+        bm25_ms = sum((attempt.bm25_ms or 0.0) for attempt in state.retrieval_attempts)
+        rrf_ms = sum((attempt.rrf_ms or 0.0) for attempt in state.retrieval_attempts)
+        rerank_ms = sum((attempt.rerank_ms or 0.0) for attempt in state.retrieval_attempts)
+        retrieval_ms = sum(attempt.elapsed_ms for attempt in state.retrieval_attempts)
+        return RagMetrics(
+            retry_count=state.retry_count,
+            retrieval_attempts=len(state.retrieval_attempts),
+            dense_ms=dense_ms,
+            bm25_ms=bm25_ms,
+            rrf_ms=rrf_ms,
+            rerank_ms=rerank_ms,
+            retrieval_ms=retrieval_ms,
+            generation_ms=trace.generation.elapsed_ms if trace.generation else None,
+            total_ms=total_ms,
         )
 
     def _record_event(
@@ -474,21 +468,6 @@ class EnterpriseRagGraph:
             return "comparison"
         return "fact_lookup"
 
-    @staticmethod
-    def _final_top_k_for_intent(rag_intent: str) -> int:
-        if rag_intent in {"multi_hop", "comparison", "completeness", "conflicting_info"}:
-            return 10
-        if rag_intent in {"constrained", "project_related"}:
-            return 8
-        return 5
-
-    @staticmethod
-    def _search_k_for_intent(rag_intent: str) -> int:
-        if rag_intent in {"multi_hop", "comparison", "completeness", "conflicting_info"}:
-            return 80
-        if rag_intent in {"constrained", "project_related"}:
-            return 60
-        return 40
 
     @staticmethod
     def _to_rag_document(document: Any) -> RagDocument:

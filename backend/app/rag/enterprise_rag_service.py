@@ -117,6 +117,121 @@ class EnterpriseRagService:
     async def collection_count(self) -> int:
         return await asyncio.to_thread(self.vector_store._collection.count)
 
+    async def retrieve_with_details(
+        self,
+        query: str,
+        final_top_k: int,
+        dense_top_k: int,
+        bm25_top_k: int,
+        fusion_top_k: int,
+        source_hints: list[str] | None = None,
+        use_reranker: bool = False,
+    ) -> dict[str, Any]:
+        request_start = perf_counter()
+        parent_chunks = await self._get_parent_chunks()
+        metrics: dict[str, float] = {}
+
+        step_start = perf_counter()
+        vector_results = await asyncio.to_thread(
+            self.vector_store.similarity_search_with_score,
+            query,
+            dense_top_k,
+            None,
+        )
+        metrics["dense_ms"] = (perf_counter() - step_start) * 1000
+        log_perf("enterprise_rag.chroma_search", step_start, candidates=len(vector_results), search_k=dense_top_k)
+
+        candidates: dict[str, EnterpriseRetrievedDocument] = {}
+        vector_ranked_ids: list[str] = []
+        dense_documents: list[EnterpriseRetrievedDocument] = []
+        for child_doc, _score in vector_results:
+            metadata = dict(child_doc.metadata or {})
+            parent_chunk_id = metadata.get("parent_chunk_id", "")
+            if not parent_chunk_id or parent_chunk_id in candidates:
+                continue
+            parent = parent_chunks.get(parent_chunk_id, {})
+            document = self._document_from_parent(
+                parent_chunk_id=parent_chunk_id,
+                parent=parent,
+                child_text=child_doc.page_content,
+                metadata=metadata,
+                score=0.0,
+            )
+            candidates[parent_chunk_id] = document
+            vector_ranked_ids.append(parent_chunk_id)
+            dense_documents.append(document)
+
+        step_start = perf_counter()
+        bm25_ranked_ids = await self._bm25_search(query=query, limit=bm25_top_k)
+        metrics["bm25_ms"] = (perf_counter() - step_start) * 1000
+        log_perf("enterprise_rag.bm25_search", step_start, candidates=len(bm25_ranked_ids), search_k=bm25_top_k)
+
+        bm25_documents: list[EnterpriseRetrievedDocument] = []
+        for parent_chunk_id in bm25_ranked_ids:
+            parent = parent_chunks.get(parent_chunk_id, {})
+            document = candidates.get(parent_chunk_id)
+            if document is None:
+                document = self._document_from_parent(
+                    parent_chunk_id=parent_chunk_id,
+                    parent=parent,
+                    child_text=parent.get("text", ""),
+                    metadata={},
+                    score=0.0,
+                )
+                candidates[parent_chunk_id] = document
+            bm25_documents.append(document)
+
+        step_start = perf_counter()
+        fused_scores = self._rrf_fuse(
+            ranked_lists=[vector_ranked_ids, bm25_ranked_ids],
+            source_hints=source_hints,
+            candidates=candidates,
+        )
+        metrics["rrf_ms"] = (perf_counter() - step_start) * 1000
+        log_perf("enterprise_rag.rrf_fuse", step_start, candidates=len(candidates), fused=len(fused_scores))
+
+        fused_documents = [
+            candidates[parent_chunk_id]
+            for parent_chunk_id, _score in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
+            if parent_chunk_id in candidates
+        ][:fusion_top_k]
+        for document in fused_documents:
+            document.score = fused_scores.get(document.parent_chunk_id, 0.0)
+
+        reranked_documents = fused_documents
+        if use_reranker:
+            step_start = perf_counter()
+            reranked_documents = await self._rerank_documents(query=query, documents=fused_documents)
+            metrics["rerank_ms"] = (perf_counter() - step_start) * 1000
+            log_perf("enterprise_rag.reranker", step_start, candidates=len(reranked_documents))
+        else:
+            metrics["rerank_ms"] = 0.0
+
+        selected_documents = reranked_documents[:final_top_k]
+        metrics["total_ms"] = (perf_counter() - request_start) * 1000
+        log_perf(
+            "enterprise_rag.retrieve_total",
+            request_start,
+            retrieved=len(selected_documents),
+            reranker=use_reranker,
+        )
+
+        logger.info(
+            "【EnterpriseRAG】query=%s strategy=chroma+bm25+rrf reranker=%s source_hints=%s retrieved_parent_chunks=%s",
+            query,
+            use_reranker,
+            source_hints or [],
+            len(selected_documents),
+        )
+        return {
+            "dense_results": [document.to_dict() for document in dense_documents],
+            "bm25_results": [document.to_dict() for document in bm25_documents],
+            "fused_results": [document.to_dict() for document in fused_documents],
+            "reranked_results": [document.to_dict() for document in reranked_documents] if use_reranker else [],
+            "selected_documents": [document.to_dict() for document in selected_documents],
+            "metrics": metrics,
+        }
+
     async def retrieve(
         self,
         query: str,
@@ -128,94 +243,34 @@ class EnterpriseRagService:
         router_confidence: float | None = None,
         use_reranker: bool | None = None,
     ) -> list[EnterpriseRetrievedDocument]:
-        retrieve_start = perf_counter()
         reranker_enabled = self._should_use_reranker(
             rag_intent=rag_intent,
             router_confidence=router_confidence,
             use_reranker=use_reranker,
         )
-        where = self._build_source_filter(source_hints) if strict_source_filter else None
-        step_start = perf_counter()
-        vector_results = await asyncio.to_thread(
-            self.vector_store.similarity_search_with_score,
-            query,
-            search_k,
-            where,
-        )
-        log_perf("enterprise_rag.chroma_search", step_start, candidates=len(vector_results), search_k=search_k)
-        parent_chunks = await self._get_parent_chunks()
-
-        candidates: dict[str, EnterpriseRetrievedDocument] = {}
-        vector_ranked_ids: list[str] = []
-        for child_doc, _score in vector_results:
-            metadata = dict(child_doc.metadata or {})
-            parent_chunk_id = metadata.get("parent_chunk_id", "")
-            if not parent_chunk_id or parent_chunk_id in candidates:
-                continue
-
-            parent = parent_chunks.get(parent_chunk_id, {})
-            candidates[parent_chunk_id] = self._document_from_parent(
-                parent_chunk_id=parent_chunk_id,
-                parent=parent,
-                child_text=child_doc.page_content,
-                metadata=metadata,
-                score=0.0,
-            )
-            vector_ranked_ids.append(parent_chunk_id)
-
-        step_start = perf_counter()
-        bm25_ranked_ids = await self._bm25_search(query=query, limit=search_k)
-        log_perf("enterprise_rag.bm25_search", step_start, candidates=len(bm25_ranked_ids), search_k=search_k)
-        for parent_chunk_id in bm25_ranked_ids:
-            if parent_chunk_id in candidates:
-                continue
-            parent = parent_chunks.get(parent_chunk_id, {})
-            candidates[parent_chunk_id] = self._document_from_parent(
-                parent_chunk_id=parent_chunk_id,
-                parent=parent,
-                child_text=parent.get("text", ""),
-                metadata={},
-                score=0.0,
-            )
-
-        step_start = perf_counter()
-        fused_scores = self._rrf_fuse(
-            ranked_lists=[vector_ranked_ids, bm25_ranked_ids],
+        result = await self.retrieve_with_details(
+            query=query,
+            final_top_k=k,
+            dense_top_k=search_k,
+            bm25_top_k=search_k,
+            fusion_top_k=max(search_k, k),
             source_hints=source_hints,
-            candidates=candidates,
+            use_reranker=reranker_enabled,
         )
-        log_perf("enterprise_rag.rrf_fuse", step_start, candidates=len(candidates), fused=len(fused_scores))
-        documents = [
-            candidates[parent_chunk_id]
-            for parent_chunk_id, _score in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
-            if parent_chunk_id in candidates
-        ][: max(search_k, k)]
-
-        for document in documents:
-            document.score = fused_scores.get(document.parent_chunk_id, 0.0)
-
-        if reranker_enabled:
-            step_start = perf_counter()
-            documents = await self._rerank_documents(query=query, documents=documents)
-            log_perf("enterprise_rag.reranker", step_start, candidates=len(documents))
-
-        documents = documents[:k]
-        log_perf(
-            "enterprise_rag.retrieve_total",
-            retrieve_start,
-            retrieved=len(documents),
-            rag_intent=rag_intent,
-            reranker=reranker_enabled,
-        )
-
-        logger.info(
-            "【EnterpriseRAG】query=%s strategy=chroma+bm25+rrf reranker=%s source_hints=%s retrieved_parent_chunks=%s",
-            query,
-            reranker_enabled,
-            source_hints or [],
-            len(documents),
-        )
-        return documents
+        return [
+            EnterpriseRetrievedDocument(
+                parent_doc_id=item.get("parent_doc_id", ""),
+                parent_chunk_id=item.get("parent_chunk_id", ""),
+                source_type=item.get("source_type", ""),
+                title=item.get("title", ""),
+                section_heading=item.get("section_heading", ""),
+                score=float(item.get("score", 0.0) or 0.0),
+                child_text=item.get("child_text", ""),
+                parent_text=item.get("parent_text", ""),
+                metadata=dict(item.get("metadata") or {}),
+            )
+            for item in result["selected_documents"]
+        ]
 
     async def get_documents_and_summary(
         self,
