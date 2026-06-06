@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -340,6 +341,46 @@ def test_summarize_generation_records_marks_incomplete_below_valid_score_thresho
     assert summary["average_latency_ms"] == 150.0
     assert summary["faithfulness"] == 0.9
     assert summary["answer_relevancy"] == 0.8
+
+
+def test_write_generation_outputs_creates_standard_files(tmp_path):
+    config = {
+        "git_commit": "abc123",
+        "dataset_path": "questions.jsonl",
+        "question_count": 1,
+        "judge_provider": "openai",
+        "judge_model": "gpt-4o",
+    }
+    records = [
+        {
+            "question_id": "q1",
+            "question_type": "fact_lookup",
+            "question": "Where is the PTO policy?",
+            "reference": "The PTO policy is in HR handbook.",
+            "answer": "The PTO policy is in HR handbook.",
+            "retrieved_contexts": ["HR handbook PTO policy."],
+            "source_doc_ids": ["doc_a"],
+            "source_chunk_ids": ["chunk_a"],
+            "ragas_scores": {"faithfulness": 0.9},
+            "latency_ms": 100.0,
+        }
+    ]
+    summary = summarize_generation_records(records, intended_count=1)
+
+    from scripts.evaluate_enterprise_rag_generation import write_generation_outputs
+
+    run_dir = write_generation_outputs(tmp_path / "outputs", tmp_path / "baseline", config, records, summary)
+
+    assert (run_dir / "config.json").exists()
+    assert (run_dir / "generation_ragas_summary.json").exists()
+    assert (run_dir / "generation_ragas_details.jsonl").exists()
+    assert (run_dir / "generation_ragas_failures.jsonl").exists()
+    assert (run_dir / "report.md").exists()
+    saved_summary = json.loads((run_dir / "generation_ragas_summary.json").read_text(encoding="utf-8"))
+    assert saved_summary["faithfulness"] == 0.9
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "RAG Generation Evaluation Report" in report
+    assert "gpt-4o" in report
 
 
 def test_capturing_trace_store_keeps_saved_traces():

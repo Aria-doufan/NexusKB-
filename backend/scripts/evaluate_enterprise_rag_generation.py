@@ -336,19 +336,30 @@ def render_generation_report(
 
 def write_generation_outputs(
     output_root: Path,
+    baseline_dir: Path,
     config: dict[str, Any],
     records: list[dict[str, Any]],
     summary: dict[str, Any],
-    baseline_dir: Path,
 ) -> Path:
     run_dir = output_root / utc_run_id("generation")
     run_dir.mkdir(parents=True, exist_ok=False)
-    baseline_summary = load_json_if_exists(baseline_dir / "summary.json")
+    baseline_summary = load_json_if_exists(baseline_dir / "generation_ragas_summary.json")
     report = render_generation_report(config, summary, baseline_summary)
+    failures = [record for record in records if record.get("generation_error") or record.get("ragas_error")]
 
     (run_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "records.json").write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "generation_ragas_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / "generation_ragas_details.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    (run_dir / "generation_ragas_failures.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in failures),
+        encoding="utf-8",
+    )
     (run_dir / "report.md").write_text(report, encoding="utf-8")
     return run_dir
 
@@ -369,7 +380,7 @@ async def async_main() -> int:
         "git_commit": short_git_commit(),
         "ragas_status": "wired",
     }
-    run_dir = write_generation_outputs(args.output_root, config, records, summary, args.baseline_dir)
+    run_dir = write_generation_outputs(args.output_root, args.baseline_dir, config, records, summary)
     print(f"Wrote generation evaluation records to {run_dir}")
     return 0
 
