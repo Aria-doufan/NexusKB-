@@ -106,6 +106,56 @@ def test_question_type_summary_averages_metrics_by_type():
     assert summary["comparison"]["evidence_coverage@1"] == 1.0
 
 
+def test_question_type_summary_emits_map_for_each_k():
+    details = [
+        {
+            "question_type": "lookup",
+            "latency_ms": 100.0,
+            "hit@1": 1,
+            "precision@1": 1.0,
+            "recall@1": 1.0,
+            "f1@1": 1.0,
+            "ndcg@1": 1.0,
+            "ap@1": 1.0,
+            "evidence_coverage@1": 0.0,
+            "hit@3": 1,
+            "precision@3": 1.0 / 3.0,
+            "recall@3": 1.0,
+            "f1@3": 0.5,
+            "ndcg@3": 1.0,
+            "ap@3": 1.0,
+            "evidence_coverage@3": 0.0,
+            "required_evidence_groups_count": 0,
+            "rr@3": 1.0,
+        },
+        {
+            "question_type": "lookup",
+            "latency_ms": 200.0,
+            "hit@1": 0,
+            "precision@1": 0.0,
+            "recall@1": 0.0,
+            "f1@1": 0.0,
+            "ndcg@1": 0.0,
+            "ap@1": 0.0,
+            "evidence_coverage@1": 0.0,
+            "hit@3": 1,
+            "precision@3": 1.0 / 3.0,
+            "recall@3": 1.0,
+            "f1@3": 0.5,
+            "ndcg@3": 0.5,
+            "ap@3": 0.5,
+            "evidence_coverage@3": 0.0,
+            "required_evidence_groups_count": 0,
+            "rr@3": 0.5,
+        },
+    ]
+
+    summary = build_question_type_summary(details, [1, 3])
+
+    assert summary["lookup"]["map@1"] == 0.5
+    assert summary["lookup"]["map@3"] == 0.75
+
+
 def test_question_type_summary_averages_evidence_coverage_only_for_annotated_questions():
     details = [
         {

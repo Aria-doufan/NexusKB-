@@ -126,6 +126,7 @@ def build_question_type_summary(
                 "ap",
             ):
                 type_summary[f"{metric}@{k}"] = average_numeric(rows, f"{metric}@{k}")
+            type_summary[f"map@{k}"] = average_numeric(rows, f"ap@{k}")
             type_summary[f"evidence_coverage@{k}"] = average_numeric(
                 evidence_coverage_rows, f"evidence_coverage@{k}"
             )

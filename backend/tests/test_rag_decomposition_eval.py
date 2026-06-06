@@ -540,6 +540,7 @@ def test_summarize_includes_question_type_summary_and_map():
 
     assert summary["map@1"] == 0.25
     assert summary["question_type_summary"]["lookup"]["questions"] == 1
+    assert summary["question_type_summary"]["lookup"]["map@1"] == 0.5
     assert summary["question_type_summary"]["comparison"]["questions"] == 1
 
 
