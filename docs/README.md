@@ -7,11 +7,12 @@
 ## 推荐阅读顺序
 
 1. [项目指南](./project_guide/README.md)：项目定位、当前架构、模块设计和流程图入口。
-2. [当前架构快照](./project_guide/CURRENT_ARCHITECTURE_REVIEW.md)：当前真实系统链路、技术栈和模块边界。
-3. [项目架构图集](./project_guide/NEXUSKB_ARCHITECTURE_DIAGRAMS.md)：核心服务、数据流、RAG、记忆、安全等 Mermaid 图。
-4. [项目流程图总览](./project_guide/NEXUSKB_PROJECT_FLOWCHARTS.md)：整体流程和各模块流程图。
-5. [RAGFlow Agentic RAG 路线图](./RAGFLOW_AGENTIC_RAG_ROADMAP.md)：Agentic RAG 后续演进和任务状态。
-6. [部署指南](./ops/deployment.md) 与 [故障排除](./ops/troubleshooting.md)：运行、部署和排错。
+2. [版本更新记录](./VERSION_UPDATES.md)：项目级阶段版本、能力演进和后续维护规则。
+3. [当前架构快照](./project_guide/CURRENT_ARCHITECTURE_REVIEW.md)：当前真实系统链路、技术栈和模块边界。
+4. [项目架构图集](./project_guide/NEXUSKB_ARCHITECTURE_DIAGRAMS.md)：核心服务、数据流、RAG、记忆、安全等 Mermaid 图。
+5. [项目流程图总览](./project_guide/NEXUSKB_PROJECT_FLOWCHARTS.md)：整体流程和各模块流程图。
+6. [RAGFlow Agentic RAG 路线图](./RAGFLOW_AGENTIC_RAG_ROADMAP.md)：Agentic RAG 后续演进和任务状态。
+7. [部署指南](./ops/deployment.md) 与 [故障排除](./ops/troubleshooting.md)：运行、部署和排错。
 
 ## 文档分层
 
@@ -30,6 +31,7 @@
 ### 项目指南
 
 - [项目指南入口](./project_guide/README.md)
+- [版本更新记录](./VERSION_UPDATES.md)
 - [项目总览](./project_guide/PROJECT_OVERVIEW.md)
 - [项目介绍](./project_guide/PROJECT_INTRO.md)
 - [当前架构快照](./project_guide/CURRENT_ARCHITECTURE_REVIEW.md)
