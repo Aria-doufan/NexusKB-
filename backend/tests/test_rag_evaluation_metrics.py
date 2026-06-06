@@ -66,6 +66,7 @@ def test_question_type_summary_averages_metrics_by_type():
             "ndcg@1": 1.0,
             "ap@1": 1.0,
             "evidence_coverage@1": 0.0,
+            "required_evidence_groups_count": 0,
             "rr@1": 1.0,
         },
         {
@@ -77,6 +78,7 @@ def test_question_type_summary_averages_metrics_by_type():
             "ndcg@1": 0.0,
             "ap@1": 0.0,
             "evidence_coverage@1": 0.0,
+            "required_evidence_groups_count": 0,
             "rr@1": 0.0,
         },
         {
@@ -88,6 +90,7 @@ def test_question_type_summary_averages_metrics_by_type():
             "ndcg@1": 1.0,
             "ap@1": 1.0,
             "evidence_coverage@1": 1.0,
+            "required_evidence_groups_count": 1,
             "rr@1": 1.0,
         },
     ]
@@ -101,3 +104,39 @@ def test_question_type_summary_averages_metrics_by_type():
     assert summary["fact_lookup"]["recall@1"] == 0.25
     assert summary["comparison"]["questions"] == 1
     assert summary["comparison"]["evidence_coverage@1"] == 1.0
+
+
+def test_question_type_summary_averages_evidence_coverage_only_for_annotated_questions():
+    details = [
+        {
+            "question_type": "comparison",
+            "latency_ms": 100.0,
+            "hit@1": 1,
+            "precision@1": 1.0,
+            "recall@1": 1.0,
+            "ndcg@1": 1.0,
+            "ap@1": 1.0,
+            "evidence_coverage@1": 1.0,
+            "required_evidence_groups_count": 1,
+            "rr@1": 1.0,
+        },
+        {
+            "question_type": "comparison",
+            "latency_ms": 300.0,
+            "hit@1": 0,
+            "precision@1": 0.0,
+            "recall@1": 0.0,
+            "ndcg@1": 0.0,
+            "ap@1": 0.0,
+            "evidence_coverage@1": 0.0,
+            "required_evidence_groups_count": 0,
+            "rr@1": 0.0,
+        },
+    ]
+
+    summary = build_question_type_summary(details, [1])
+
+    assert summary["comparison"]["questions"] == 2
+    assert summary["comparison"]["precision@1"] == 0.5
+    assert summary["comparison"]["evidence_coverage@1"] == 1.0
+    assert summary["comparison"]["evidence_coverage_questions"] == 1

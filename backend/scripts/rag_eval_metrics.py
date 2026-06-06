@@ -105,8 +105,12 @@ def build_question_type_summary(
     summary: dict[str, dict[str, float | int]] = {}
 
     for question_type, rows in grouped.items():
+        evidence_coverage_rows = [
+            row for row in rows if row.get("required_evidence_groups_count", 0) > 0
+        ]
         type_summary: dict[str, float | int] = {
             "questions": len(rows),
+            "evidence_coverage_questions": len(evidence_coverage_rows),
             "average_latency_ms": average_numeric(rows, "latency_ms"),
             f"mrr@{max_k}": average_numeric(rows, f"rr@{max_k}"),
             f"map@{max_k}": average_numeric(rows, f"ap@{max_k}"),
@@ -120,9 +124,11 @@ def build_question_type_summary(
                 "f1",
                 "ndcg",
                 "ap",
-                "evidence_coverage",
             ):
                 type_summary[f"{metric}@{k}"] = average_numeric(rows, f"{metric}@{k}")
+            type_summary[f"evidence_coverage@{k}"] = average_numeric(
+                evidence_coverage_rows, f"evidence_coverage@{k}"
+            )
 
         summary[question_type] = type_summary
 
