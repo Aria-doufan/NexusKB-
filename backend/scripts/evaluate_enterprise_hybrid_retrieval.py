@@ -722,8 +722,7 @@ def evaluate_question(
         detail[f"recall@{k}"] = recall
         detail[f"f1@{k}"] = f1
         detail[f"ndcg@{k}"] = ndcg_at_k(ranked_doc_ids, expected, k)
-        ap_denominator_adjustment = min(len(expected), k) / max(len(expected), 1)
-        detail[f"ap@{k}"] = average_precision_at_k(ranked_doc_ids, expected, k) * ap_denominator_adjustment
+        detail[f"ap@{k}"] = average_precision_at_k(ranked_doc_ids, expected, k)
         detail[f"matched_doc_ids@{k}"] = matched
         detail[f"evidence_coverage@{k}"] = evidence_coverage_at_k(
             ranked_chunk_ids,

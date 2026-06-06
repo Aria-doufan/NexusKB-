@@ -332,7 +332,7 @@ def test_evaluate_question_includes_ndcg_and_average_precision_metrics():
 
     assert detail["ndcg@1"] == 1.0
     assert 0.0 < detail["ndcg@3"] < 1.0
-    assert detail["ap@1"] == 0.5
+    assert detail["ap@1"] == 1.0
     assert detail["ap@3"] == (1 / 1 + 2 / 3) / 2
 
 
