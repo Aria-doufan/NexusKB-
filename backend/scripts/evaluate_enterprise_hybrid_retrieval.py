@@ -36,6 +36,7 @@ from scripts.rag_eval_metrics import (
     recall_at_k,
     reciprocal_rank_at_k,
 )
+from scripts.rag_eval_reporting import load_json_if_exists, render_retrieval_report, short_git_commit, utc_run_id
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -210,6 +211,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reranker-max-length", type=int, default=512)
     parser.add_argument("--reranker-candidate-k", type=int, default=20)
     parser.add_argument("--reranker-batch-size", type=int, default=4)
+    parser.add_argument("--run-output-root", type=Path, default=BACKEND_DIR / "data" / "eval_outputs")
+    parser.add_argument("--baseline-dir", type=Path, default=BACKEND_DIR / "data" / "eval_baselines" / "current")
+    parser.add_argument("--standard-output", action="store_true", help="Also write standardized run artifacts and report.md.")
+    parser.add_argument("--ci", action="store_true", help="Record CI mode in config without enforcing regressions in this version.")
+    parser.add_argument("--fail-on-regression", action="store_true", help="Reserved for future threshold enforcement; no-op in this version.")
     return parser.parse_args()
 
 
@@ -795,27 +801,34 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
     return summary
 
 
-def classify_failure(row: dict[str, Any], k_values: list[int]) -> str | None:
+def classify_failures(row: dict[str, Any], k_values: list[int]) -> list[str]:
     max_k = max(k_values)
+    reasons: list[str] = []
     if row["dedup_parent_results"] == 0:
-        return "no_candidates"
+        return ["no_candidates"]
     if row[f"hit@{max_k}"] == 0:
-        return "missed_all_gold"
-    if row.get("reranker_used") and row.get(f"hit@1") == 0:
-        return "reranker_top1_not_gold"
-    if row.get("source_boost_applied") and row.get(f"hit@1") == 0:
-        return "source_boost_top1_not_gold"
-    if row.get(f"hit@1") == 0:
-        return "gold_rank_too_low"
-    return None
+        reasons.append("no_gold_hit")
+    if row.get(f"recall@{max_k}", 0.0) < 0.5:
+        reasons.append("low_recall")
+    if row.get(f"precision@{max_k}", 0.0) < 0.2:
+        reasons.append("low_precision")
+    if row.get(f"ndcg@{max_k}", 0.0) < 0.5:
+        reasons.append("low_ndcg")
+    if row.get(f"ap@{max_k}", 0.0) < 0.5:
+        reasons.append("low_map")
+    if row.get("required_evidence_groups_count", 0) > 0 and row.get(f"evidence_coverage@{max_k}", 0.0) < 1.0:
+        reasons.append("evidence_group_missing")
+    if row.get("reranker_used") and row.get("hit@1") == 0:
+        reasons.append("reranker_top1_miss")
+    return reasons
 
 
 def build_failure_rows(details: list[dict[str, Any]], k_values: list[int]) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
     max_k = max(k_values)
     for row in details:
-        failure_type = classify_failure(row, k_values)
-        if failure_type is None:
+        failure_reasons = classify_failures(row, k_values)
+        if not failure_reasons:
             continue
         failures.append(
             {
@@ -828,7 +841,7 @@ def build_failure_rows(details: list[dict[str, Any]], k_values: list[int]) -> li
                 "expected_doc_ids": row["expected_doc_ids"],
                 "retrieved_parent_doc_ids": row["retrieved_parent_doc_ids"][:max_k],
                 "matched_doc_ids": row[f"matched_doc_ids@{max_k}"],
-                "failure_type": failure_type,
+                "failure_reasons": failure_reasons,
                 "reranker_used": row.get("reranker_used", False),
                 "source_boost_applied": row.get("source_boost_applied", False),
                 "latency_ms": row["latency_ms"],
@@ -923,6 +936,50 @@ def write_outputs(
             writer.writerow(csv_row)
 
 
+def write_standard_retrieval_outputs(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+    details: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    k_values: list[int],
+) -> Path:
+    run_dir = args.run_output_root / utc_run_id("retrieval")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "git_commit": short_git_commit(),
+        "dataset_path": str(args.questions_path),
+        "question_count": len(details),
+        "method": args.method,
+        "k_values": k_values,
+        "embedding_model": args.embedding_model,
+        "collection_name": args.collection_name,
+        "persist_dir": str(args.persist_dir),
+        "reranker_model_path": args.reranker_model_path if method_needs_reranker(normalize_method(args.method)) else None,
+        "reranker_candidate_k": args.reranker_candidate_k,
+        "judge_provider": None,
+        "judge_model": None,
+        "ci": args.ci,
+        "fail_on_regression": args.fail_on_regression,
+    }
+
+    with (run_dir / "config.json").open("w", encoding="utf-8") as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    with (run_dir / "retrieval_summary.json").open("w", encoding="utf-8") as file:
+        json.dump(summary, file, ensure_ascii=False, indent=2)
+    with (run_dir / "retrieval_details.jsonl").open("w", encoding="utf-8") as file:
+        for row in details:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with (run_dir / "retrieval_failures.jsonl").open("w", encoding="utf-8") as file:
+        for row in failures:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    baseline_summary = load_json_if_exists(args.baseline_dir / "retrieval_summary.json")
+    report = render_retrieval_report(config, summary, failures, baseline_summary)
+    (run_dir / "report.md").write_text(report, encoding="utf-8")
+    return run_dir
+
+
 def main() -> None:
     args = parse_args()
     normalized_method = normalize_method(args.method)
@@ -1014,6 +1071,9 @@ def main() -> None:
         }
     )
     write_outputs(args.output_dir, args.method, summary, details, k_values)
+    if args.standard_output:
+        run_dir = write_standard_retrieval_outputs(args, summary, details, failures, k_values)
+        print(f"Wrote standard retrieval outputs to {run_dir}")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

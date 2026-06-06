@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.evaluate_enterprise_hybrid_retrieval import (
     Candidate,
     Question,
+    classify_failures,
     decompose_question_for_eval,
     evaluate_question,
     evidence_coverage_at_k,
@@ -504,6 +505,32 @@ def test_strategy_matrix_decompose_preserves_single_query_behavior_for_simple_qu
     assert bm25.queries == ["What is the policy?"]
     assert detail["retrieved_chunk_ids"] == ["chunk_a"]
     assert detail["evidence_coverage"] == 1.0
+
+
+def test_classify_failures_returns_multiple_retrieval_failure_reasons():
+    row = {
+        "dedup_parent_results": 3,
+        "hit@1": 0,
+        "hit@10": 1,
+        "recall@10": 0.25,
+        "precision@10": 0.1,
+        "ndcg@10": 0.2,
+        "ap@10": 0.15,
+        "evidence_coverage@10": 0.5,
+        "required_evidence_groups_count": 2,
+        "reranker_used": True,
+    }
+
+    reasons = classify_failures(row, [1, 10])
+
+    assert reasons == [
+        "low_recall",
+        "low_precision",
+        "low_ndcg",
+        "low_map",
+        "evidence_group_missing",
+        "reranker_top1_miss",
+    ]
 
 
 def test_summarize_includes_question_type_summary_and_map():
