@@ -19,11 +19,16 @@ import json
 import math
 import os
 import re
+import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
@@ -39,7 +44,6 @@ from scripts.rag_eval_metrics import (
 from scripts.rag_eval_reporting import load_json_if_exists, render_retrieval_report, short_git_commit, utc_run_id
 
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_QUESTIONS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "questions.jsonl"
 DEFAULT_CHILD_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "child_chunks_parent_child.jsonl"
 DEFAULT_PARENT_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "parent_chunks_parent_child.jsonl"

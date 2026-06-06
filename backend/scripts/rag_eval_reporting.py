@@ -23,7 +23,7 @@ def short_git_commit() -> str:
 
 
 def utc_run_id(prefix: str = "") -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     commit = short_git_commit()
     if prefix:
         return f"{timestamp}-{prefix}-{commit}"
