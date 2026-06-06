@@ -99,20 +99,37 @@ def build_rag_state(question: Question) -> RagState:
 
 
 def final_trace_documents(trace: Any, response: RagResponse) -> list[Any]:
-    allowed_ids = _response_source_ids(response)
-    if not allowed_ids:
-        return []
+    by_chunk_or_source_id: dict[str, Any] = {}
+    by_parent_doc_id: dict[str, Any] = {}
+    for document in _trace_selected_documents(trace):
+        for field_name in ("parent_chunk_id", "source_id", "candidate_id", "id"):
+            value = (getattr(document, field_name, None) or "").strip()
+            if value and value not in by_chunk_or_source_id:
+                by_chunk_or_source_id[value] = document
+
+        parent_doc_id = (getattr(document, "parent_doc_id", None) or "").strip()
+        if parent_doc_id and parent_doc_id not in by_parent_doc_id:
+            by_parent_doc_id[parent_doc_id] = document
 
     documents: list[Any] = []
-    seen_document_ids: set[tuple[str, ...]] = set()
-    for document in _trace_selected_documents(trace):
-        document_ids = _document_source_ids(document)
-        if not document_ids or document_ids.isdisjoint(allowed_ids):
-            continue
-        dedupe_key = tuple(sorted(document_ids))
-        if dedupe_key not in seen_document_ids:
+    seen_document_ids: set[int] = set()
+    for source in response.sources or []:
+        parent_chunk_id = (getattr(source, "parent_chunk_id", None) or "").strip()
+        source_id = (getattr(source, "source_id", None) or "").strip()
+        parent_doc_id = (getattr(source, "parent_doc_id", None) or "").strip()
+
+        document = None
+        for exact_id in (parent_chunk_id, source_id):
+            if exact_id:
+                document = by_chunk_or_source_id.get(exact_id)
+                if document is not None:
+                    break
+        if document is None and not parent_chunk_id and not source_id and parent_doc_id:
+            document = by_parent_doc_id.get(parent_doc_id)
+
+        if document is not None and id(document) not in seen_document_ids:
             documents.append(document)
-            seen_document_ids.add(dedupe_key)
+            seen_document_ids.add(id(document))
     return documents
 
 
@@ -298,25 +315,6 @@ async def async_main() -> int:
 
 def main() -> int:
     return asyncio.run(async_main())
-
-
-def _response_source_ids(response: RagResponse) -> set[str]:
-    source_ids: set[str] = set()
-    for source in response.sources or []:
-        for field_name in ("parent_doc_id", "parent_chunk_id", "source_id"):
-            value = (getattr(source, field_name, None) or "").strip()
-            if value:
-                source_ids.add(value)
-    return source_ids
-
-
-def _document_source_ids(document: Any) -> set[str]:
-    source_ids: set[str] = set()
-    for field_name in ("parent_doc_id", "parent_chunk_id", "source_id", "candidate_id", "id"):
-        value = (getattr(document, field_name, None) or "").strip()
-        if value:
-            source_ids.add(value)
-    return source_ids
 
 
 def _trace_selected_documents(trace: Any) -> list[Any]:
