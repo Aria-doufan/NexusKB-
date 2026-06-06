@@ -457,6 +457,39 @@ def test_write_generation_outputs_creates_standard_files(tmp_path):
     assert "gpt-4o" in report
 
 
+def test_write_generation_outputs_includes_empty_ragas_scores_in_failures(tmp_path):
+    records = [
+        {
+            "question_id": "q-empty-scores",
+            "question_type": "fact_lookup",
+            "question": "Where is the PTO policy?",
+            "reference": "The PTO policy is in HR handbook.",
+            "answer": "The PTO policy is in HR handbook.",
+            "retrieved_contexts": ["HR handbook PTO policy."],
+            "source_doc_ids": ["doc_a"],
+            "source_chunk_ids": ["chunk_a"],
+            "ragas_scores": {},
+            "latency_ms": 100.0,
+        }
+    ]
+    summary = summarize_generation_records(records, intended_count=1)
+
+    run_dir = rag_generation_eval.write_generation_outputs(
+        tmp_path / "outputs",
+        tmp_path / "baseline",
+        {"judge_provider": "openai", "judge_model": "gpt-4o"},
+        records,
+        summary,
+    )
+
+    failures = [
+        json.loads(line)
+        for line in (run_dir / "generation_ragas_failures.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert [failure["question_id"] for failure in failures] == ["q-empty-scores"]
+
+
 def test_capturing_trace_store_keeps_saved_traces():
     store = CapturingTraceStore()
     trace = SimpleNamespace(debug_id="dbg-1")

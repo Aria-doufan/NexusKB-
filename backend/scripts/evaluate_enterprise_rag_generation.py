@@ -214,8 +214,12 @@ def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[st
     return records
 
 
+def has_valid_ragas_scores(record: dict[str, Any]) -> bool:
+    return isinstance(record.get("ragas_scores"), dict) and bool(record["ragas_scores"])
+
+
 def summarize_generation_records(records: list[dict[str, Any]], intended_count: int) -> dict[str, Any]:
-    valid_records = [record for record in records if isinstance(record.get("ragas_scores"), dict) and record["ragas_scores"]]
+    valid_records = [record for record in records if has_valid_ragas_scores(record)]
     latencies = [float(record["latency_ms"]) for record in records if isinstance(record.get("latency_ms"), int | float)]
     valid_ratio = len(valid_records) / intended_count if intended_count else 1.0
     summary: dict[str, Any] = {
@@ -352,7 +356,11 @@ def write_generation_outputs(
     run_dir.mkdir(parents=True, exist_ok=False)
     baseline_summary = load_json_if_exists(baseline_dir / "generation_ragas_summary.json")
     report = render_generation_report(config, summary, baseline_summary)
-    failures = [record for record in records if record.get("generation_error") or record.get("ragas_error")]
+    failures = [
+        record
+        for record in records
+        if record.get("generation_error") or record.get("ragas_error") or not has_valid_ragas_scores(record)
+    ]
 
     (run_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "generation_ragas_summary.json").write_text(
