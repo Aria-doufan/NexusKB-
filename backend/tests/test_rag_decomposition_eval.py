@@ -292,6 +292,50 @@ def test_strategy_matrix_decompose_skips_candidates_without_chunk_ids():
     assert detail["evidence_coverage"] == 1.0
 
 
+def test_evaluate_question_includes_ndcg_and_average_precision_metrics():
+    question = Question(
+        question_id="q_metrics",
+        question_type="lookup",
+        source_types=["policy"],
+        question="What is the policy?",
+        expected_doc_ids=["doc_a", "doc_c"],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[],
+    )
+    store = FakeStore(
+        {
+            "What is the policy?": [
+                (make_document("chunk_a", "doc_a"), 0.1),
+                (make_document("chunk_b", "doc_b"), 0.2),
+                (make_document("chunk_c", "doc_c"), 0.3),
+            ]
+        }
+    )
+
+    detail = evaluate_question(
+        method="chroma_only",
+        store=store,
+        bm25=None,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1, 3],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+    )
+
+    assert detail["ndcg@1"] == 1.0
+    assert 0.0 < detail["ndcg@3"] < 1.0
+    assert detail["ap@1"] == 0.5
+    assert detail["ap@3"] == (1 / 1 + 2 / 3) / 2
+
+
 def test_evaluate_question_uses_post_rerank_order_for_retrieved_chunks_and_evidence_coverage():
     question = Question(
         question_id="q1",
@@ -460,6 +504,43 @@ def test_strategy_matrix_decompose_preserves_single_query_behavior_for_simple_qu
     assert bm25.queries == ["What is the policy?"]
     assert detail["retrieved_chunk_ids"] == ["chunk_a"]
     assert detail["evidence_coverage"] == 1.0
+
+
+def test_summarize_includes_question_type_summary_and_map():
+    details = [
+        {
+            "question_type": "lookup",
+            "latency_ms": 100.0,
+            "hit@1": 1,
+            "precision@1": 1.0,
+            "recall@1": 0.5,
+            "f1@1": 2 / 3,
+            "ndcg@1": 1.0,
+            "ap@1": 0.5,
+            "evidence_coverage@1": 0.0,
+            "rr@1": 1.0,
+            "required_evidence_groups_count": 0,
+        },
+        {
+            "question_type": "comparison",
+            "latency_ms": 300.0,
+            "hit@1": 0,
+            "precision@1": 0.0,
+            "recall@1": 0.0,
+            "f1@1": 0.0,
+            "ndcg@1": 0.0,
+            "ap@1": 0.0,
+            "evidence_coverage@1": 0.0,
+            "rr@1": 0.0,
+            "required_evidence_groups_count": 1,
+        },
+    ]
+
+    summary = summarize(details, [1])
+
+    assert summary["map@1"] == 0.25
+    assert summary["question_type_summary"]["lookup"]["questions"] == 1
+    assert summary["question_type_summary"]["comparison"]["questions"] == 1
 
 
 def test_summarize_averages_evidence_coverage_only_for_annotated_questions():

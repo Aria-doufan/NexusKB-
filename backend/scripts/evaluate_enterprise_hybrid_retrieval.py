@@ -28,6 +28,15 @@ from typing import Any, Iterable
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 
+from scripts.rag_eval_metrics import (
+    average_precision_at_k,
+    build_question_type_summary,
+    ndcg_at_k,
+    precision_at_k,
+    recall_at_k,
+    reciprocal_rank_at_k,
+)
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_QUESTIONS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "questions.jsonl"
@@ -404,10 +413,7 @@ def chroma_search(
 
 
 def reciprocal_rank(ranked_doc_ids: list[str], expected_doc_ids: set[str], max_k: int) -> float:
-    for index, doc_id in enumerate(ranked_doc_ids[:max_k], start=1):
-        if doc_id in expected_doc_ids:
-            return 1.0 / index
-    return 0.0
+    return reciprocal_rank_at_k(ranked_doc_ids, expected_doc_ids, max_k)
 
 
 def evidence_coverage_at_k(
@@ -708,13 +714,16 @@ def evaluate_question(
     for k in k_values:
         retrieved_at_k = set(ranked_doc_ids[:k])
         matched = sorted(expected.intersection(retrieved_at_k))
-        precision = len(matched) / k
-        recall = len(matched) / max(len(expected), 1)
+        precision = precision_at_k(ranked_doc_ids, expected, k)
+        recall = recall_at_k(ranked_doc_ids, expected, k)
         f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
         detail[f"hit@{k}"] = 1 if matched else 0
         detail[f"precision@{k}"] = precision
         detail[f"recall@{k}"] = recall
         detail[f"f1@{k}"] = f1
+        detail[f"ndcg@{k}"] = ndcg_at_k(ranked_doc_ids, expected, k)
+        ap_denominator_adjustment = min(len(expected), k) / max(len(expected), 1)
+        detail[f"ap@{k}"] = average_precision_at_k(ranked_doc_ids, expected, k) * ap_denominator_adjustment
         detail[f"matched_doc_ids@{k}"] = matched
         detail[f"evidence_coverage@{k}"] = evidence_coverage_at_k(
             ranked_chunk_ids,
@@ -764,6 +773,14 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
             sum(item[f"f1@{k}"] for item in details) / max(total, 1),
             4,
         )
+        summary[f"ndcg@{k}"] = round(
+            sum(item.get(f"ndcg@{k}", 0.0) for item in details) / max(total, 1),
+            4,
+        )
+        summary[f"map@{k}"] = round(
+            sum(item.get(f"ap@{k}", 0.0) for item in details) / max(total, 1),
+            4,
+        )
         summary[f"evidence_coverage@{k}"] = round(
             sum(item.get(f"evidence_coverage@{k}", 0.0) for item in evidence_coverage_details)
             / max(evidence_coverage_questions, 1),
@@ -775,6 +792,7 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
         sum(item[f"rr@{max_mrr_k}"] for item in details) / max(total, 1),
         4,
     )
+    summary["question_type_summary"] = build_question_type_summary(details, k_values)
     return summary
 
 
@@ -866,6 +884,8 @@ def write_outputs(
                 f"precision@{k}",
                 f"recall@{k}",
                 f"f1@{k}",
+                f"ndcg@{k}",
+                f"ap@{k}",
                 f"evidence_coverage@{k}",
                 f"matched_doc_ids@{k}",
             ]
@@ -897,6 +917,8 @@ def write_outputs(
                 csv_row[f"precision@{k}"] = row[f"precision@{k}"]
                 csv_row[f"recall@{k}"] = row[f"recall@{k}"]
                 csv_row[f"f1@{k}"] = row[f"f1@{k}"]
+                csv_row[f"ndcg@{k}"] = row.get(f"ndcg@{k}", 0.0)
+                csv_row[f"ap@{k}"] = row.get(f"ap@{k}", 0.0)
                 csv_row[f"evidence_coverage@{k}"] = row.get(f"evidence_coverage@{k}", 0.0)
                 csv_row[f"matched_doc_ids@{k}"] = "|".join(row[f"matched_doc_ids@{k}"])
             writer.writerow(csv_row)
