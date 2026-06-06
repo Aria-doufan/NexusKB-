@@ -116,7 +116,13 @@ $env:OPENAI_API_KEY = "<your key>"
 conda run -n nexuskb python backend/scripts/evaluate_enterprise_rag_generation.py --limit 50 --judge-provider openai --judge-model gpt-4o
 ```
 
-Generated run artifacts are written under `backend/data/eval_outputs/`. The current manually approved baseline can be stored under `backend/data/eval_baselines/current/` for report delta comparison.
+Generated run artifacts are written under `backend/data/eval_outputs/`.
+
+Report delta comparison defaults:
+
+- Retrieval baseline: `backend/data/eval_baselines/current/retrieval_summary.json`.
+- Generation baseline: `backend/data/eval_baselines/generation/current/generation_ragas_summary.json`.
+- `--baseline-dir <path>` can override either default.
 
 ## 5. 检索指标公式
 
