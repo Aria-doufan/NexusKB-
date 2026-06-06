@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.schemas.rag import RagMetrics, RagResponse, RagSource, RagStrategySummary
 from scripts.evaluate_enterprise_hybrid_retrieval import Question
+import scripts.evaluate_enterprise_rag_generation as rag_generation_eval
 from scripts.evaluate_enterprise_rag_generation import (
     CapturingTraceStore,
     apply_ragas_scores,
@@ -218,6 +219,76 @@ def test_build_ragas_sample_dict_maps_expected_fields():
         "response": "The PTO policy is in the HR handbook.",
         "reference": "The PTO policy is in the HR handbook.",
     }
+
+
+def test_build_ragas_evaluation_components_configures_llm_embeddings_and_metric_instances(monkeypatch):
+    calls = []
+
+    class FakeDataset:
+        @classmethod
+        def from_list(cls, samples):
+            return {"samples": samples}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeOpenAIEmbeddings:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeLLMWrapper:
+        def __init__(self, chat_model):
+            self.chat_model = chat_model
+
+    class FakeEmbeddingsWrapper:
+        def __init__(self, embedding_model):
+            self.embedding_model = embedding_model
+
+    def metric_class(name):
+        class FakeMetric:
+            def __init__(self, **kwargs):
+                self.name = name
+                self.kwargs = kwargs
+                calls.append((name, kwargs))
+
+        return FakeMetric
+
+    monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(Dataset=FakeDataset))
+    monkeypatch.setitem(sys.modules, "langchain_openai.chat_models", SimpleNamespace(ChatOpenAI=FakeChatOpenAI))
+    monkeypatch.setitem(sys.modules, "langchain_openai.embeddings", SimpleNamespace(OpenAIEmbeddings=FakeOpenAIEmbeddings))
+    monkeypatch.setitem(sys.modules, "ragas", SimpleNamespace(evaluate=lambda *args, **kwargs: None))
+    monkeypatch.setitem(sys.modules, "ragas.llms", SimpleNamespace(LangchainLLMWrapper=FakeLLMWrapper))
+    monkeypatch.setitem(sys.modules, "ragas.embeddings", SimpleNamespace(LangchainEmbeddingsWrapper=FakeEmbeddingsWrapper))
+    monkeypatch.setitem(
+        sys.modules,
+        "ragas.metrics",
+        SimpleNamespace(
+            AnswerCorrectness=metric_class("answer_correctness"),
+            AnswerRelevancy=metric_class("answer_relevancy"),
+            ContextPrecision=metric_class("context_precision"),
+            ContextRecall=metric_class("context_recall"),
+            Faithfulness=metric_class("faithfulness"),
+        ),
+    )
+
+    dataset_class, evaluate, metrics, llm = rag_generation_eval._build_ragas_evaluation_components("gpt-4o-mini")
+
+    assert dataset_class is FakeDataset
+    assert evaluate is sys.modules["ragas"].evaluate
+    assert llm.chat_model.kwargs == {"model": "gpt-4o-mini", "temperature": 0}
+    assert llm is calls[0][1]["llm"]
+    answer_relevancy = next(kwargs for name, kwargs in calls if name == "answer_relevancy")
+    answer_correctness = next(kwargs for name, kwargs in calls if name == "answer_correctness")
+    assert answer_relevancy["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-small"}
+    assert answer_correctness["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-small"}
+    assert [metric.name for metric in metrics] == [
+        "faithfulness",
+        "answer_relevancy",
+        "answer_correctness",
+        "context_precision",
+        "context_recall",
+    ]
 
 
 def test_apply_ragas_scores_attaches_scores_and_records_metric_errors():

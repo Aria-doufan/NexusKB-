@@ -261,22 +261,38 @@ async def generate_records(questions: list[Question]) -> list[dict[str, Any]]:
     return records
 
 
+def _build_ragas_evaluation_components(judge_model: str):
+    from datasets import Dataset
+    from langchain_openai.chat_models import ChatOpenAI
+    from langchain_openai.embeddings import OpenAIEmbeddings
+    from ragas import evaluate
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.metrics import AnswerCorrectness, AnswerRelevancy, ContextPrecision, ContextRecall, Faithfulness
+
+    llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
+    embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model="text-embedding-3-small"))
+    metrics = [
+        Faithfulness(llm=llm),
+        AnswerRelevancy(llm=llm, embeddings=embeddings),
+        AnswerCorrectness(llm=llm, embeddings=embeddings),
+        ContextPrecision(llm=llm),
+        ContextRecall(llm=llm),
+    ]
+    return Dataset, evaluate, metrics, llm
+
+
 def run_ragas_evaluation(records: list[dict[str, Any]], judge_provider: str, judge_model: str) -> list[dict[str, Any]]:
     if judge_provider != "openai":
         raise ValueError(f"Unsupported RAGAS judge provider for this version: {judge_provider}")
 
     def evaluator(samples: list[dict[str, Any]]) -> list[dict[str, float]]:
-        from datasets import Dataset
-        from langchain_openai import ChatOpenAI
-        from ragas import evaluate
-        from ragas.llms import LangchainLLMWrapper
-        from ragas.metrics import answer_correctness, answer_relevancy, context_precision, context_recall, faithfulness
+        Dataset, evaluate, metrics, llm = _build_ragas_evaluation_components(judge_model)
 
         dataset = Dataset.from_list(samples)
-        llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
         result = evaluate(
             dataset,
-            metrics=[faithfulness, answer_relevancy, answer_correctness, context_precision, context_recall],
+            metrics=metrics,
             llm=llm,
         )
         dataframe = result.to_pandas()
