@@ -8,6 +8,7 @@ from app.schemas.rag import RagMetrics, RagResponse, RagSource, RagStrategySumma
 from scripts.evaluate_enterprise_hybrid_retrieval import Question
 from scripts.evaluate_enterprise_rag_generation import (
     CapturingTraceStore,
+    apply_ragas_scores,
     build_rag_state,
     build_ragas_sample_dict,
     normalize_generation_rag_intent,
@@ -217,6 +218,41 @@ def test_build_ragas_sample_dict_maps_expected_fields():
         "response": "The PTO policy is in the HR handbook.",
         "reference": "The PTO policy is in the HR handbook.",
     }
+
+
+def test_apply_ragas_scores_attaches_scores_and_records_metric_errors():
+    records = [
+        {
+            "question_id": "q1",
+            "question": "Where is the PTO policy?",
+            "retrieved_contexts": ["The HR handbook contains the PTO policy."],
+            "answer": "The PTO policy is in the HR handbook.",
+            "reference": "The PTO policy is in the HR handbook.",
+        },
+        {
+            "question_id": "q2",
+            "question": "Unknown?",
+            "retrieved_contexts": [],
+            "answer": "",
+            "reference": "Reference",
+        },
+    ]
+
+    def fake_evaluator(samples):
+        assert samples[0]["user_input"] == "Where is the PTO policy?"
+        return [
+            {"faithfulness": 0.9, "answer_relevancy": 0.8, "answer_correctness": 0.7},
+            RuntimeError("judge failed"),
+        ]
+
+    scored = apply_ragas_scores(records, fake_evaluator)
+
+    assert scored[0]["ragas_scores"] == {
+        "faithfulness": 0.9,
+        "answer_relevancy": 0.8,
+        "answer_correctness": 0.7,
+    }
+    assert scored[1]["ragas_error"] == "judge failed"
 
 
 def test_summarize_generation_records_marks_incomplete_below_valid_score_threshold():

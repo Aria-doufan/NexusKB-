@@ -1,9 +1,4 @@
-"""Assemble generation evaluation records for EnterpriseRAG-Bench.
-
-This script intentionally does not call RAGAS yet. Task 5 wires live RAGAS
-judging; this task captures the generation records and output scaffolding that
-RAGAS will consume.
-"""
+"""Evaluate EnterpriseRAG-Bench generation records with RAGAS judges."""
 
 from __future__ import annotations
 
@@ -190,6 +185,28 @@ def build_ragas_sample_dict(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[str, Any]]:
+    samples = [build_ragas_sample_dict(record) for record in records if not record.get("generation_error")]
+    sample_indexes = [index for index, record in enumerate(records) if not record.get("generation_error")]
+    try:
+        results = evaluator(samples)
+    except Exception as exc:
+        for index in sample_indexes:
+            records[index]["ragas_error"] = str(exc)
+        return records
+
+    for index, result in zip(sample_indexes, results):
+        if isinstance(result, Exception):
+            records[index]["ragas_error"] = str(result)
+        else:
+            records[index]["ragas_scores"] = {
+                key: float(value)
+                for key, value in dict(result).items()
+                if value is not None
+            }
+    return records
+
+
 def summarize_generation_records(records: list[dict[str, Any]], intended_count: int) -> dict[str, Any]:
     valid_records = [record for record in records if isinstance(record.get("ragas_scores"), dict)]
     latencies = [float(record["latency_ms"]) for record in records if isinstance(record.get("latency_ms"), int | float)]
@@ -245,7 +262,34 @@ async def generate_records(questions: list[Question]) -> list[dict[str, Any]]:
 
 
 def run_ragas_evaluation(records: list[dict[str, Any]], judge_provider: str, judge_model: str) -> list[dict[str, Any]]:
-    raise RuntimeError("RAGAS evaluation is wired in Task 5")
+    if judge_provider != "openai":
+        raise ValueError(f"Unsupported RAGAS judge provider for this version: {judge_provider}")
+
+    def evaluator(samples: list[dict[str, Any]]) -> list[dict[str, float]]:
+        from datasets import Dataset
+        from langchain_openai import ChatOpenAI
+        from ragas import evaluate
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.metrics import answer_correctness, answer_relevancy, context_precision, context_recall, faithfulness
+
+        dataset = Dataset.from_list(samples)
+        llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
+        result = evaluate(
+            dataset,
+            metrics=[faithfulness, answer_relevancy, answer_correctness, context_precision, context_recall],
+            llm=llm,
+        )
+        dataframe = result.to_pandas()
+        return [
+            {
+                metric: float(row[metric])
+                for metric in RAGAS_METRIC_NAMES
+                if metric in row and row[metric] == row[metric]
+            }
+            for row in dataframe.to_dict(orient="records")
+        ]
+
+    return apply_ragas_scores(records, evaluator)
 
 
 def render_generation_report(
@@ -297,6 +341,7 @@ async def async_main() -> int:
     args = parse_args()
     questions = load_questions(args.questions_path, limit=args.limit)
     records = await generate_records(questions)
+    records = run_ragas_evaluation(records, args.judge_provider, args.judge_model)
     summary = summarize_generation_records(records, intended_count=len(questions))
     config = {
         "questions_path": str(args.questions_path),
@@ -306,7 +351,7 @@ async def async_main() -> int:
         "ci": args.ci,
         "fail_on_regression": args.fail_on_regression,
         "git_commit": short_git_commit(),
-        "ragas_status": "not_wired_task_4",
+        "ragas_status": "wired",
     }
     run_dir = write_generation_outputs(args.output_root, config, records, summary, args.baseline_dir)
     print(f"Wrote generation evaluation records to {run_dir}")
