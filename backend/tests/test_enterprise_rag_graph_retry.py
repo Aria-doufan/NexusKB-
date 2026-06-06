@@ -13,11 +13,17 @@ class SequenceEnterpriseRagService:
         self.retrieve_calls = []
         self.generated_queries = []
 
-    async def retrieve(self, **kwargs):
+    async def retrieve_with_details(self, **kwargs):
         self.retrieve_calls.append(kwargs)
-        if self.result_sequence:
-            return self.result_sequence.pop(0)
-        return []
+        documents = self.result_sequence.pop(0) if self.result_sequence else []
+        return {
+            "dense_results": documents,
+            "bm25_results": [],
+            "fused_results": documents,
+            "reranked_results": documents if kwargs.get("use_reranker") else [],
+            "selected_documents": documents[: kwargs["final_top_k"]],
+            "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0 if kwargs.get("use_reranker") else 0.0},
+        }
 
     async def generate_answer(self, query, documents, memory_context=None):
         self.generated_queries.append(query)

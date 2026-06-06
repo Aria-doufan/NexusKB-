@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any
+from typing import Any, NotRequired, TypedDict
+
+from langgraph.graph import END, START, StateGraph
 
 from app.rag.decomposition import decompose_query, merge_decomposed_scores
 from app.schemas.rag import (
@@ -27,6 +29,15 @@ from app.schemas.rag_debug import (
 from app.services.rag_debug_trace_store import debug_trace_store
 
 
+class EnterpriseRagGraphState(TypedDict):
+    rag_state: RagState
+    trace: NotRequired[RagDebugTrace]
+    started: NotRequired[float]
+    started_at: NotRequired[str]
+    retry_reason: NotRequired[str | None]
+    response: NotRequired[RagResponse]
+
+
 class EnterpriseRagGraph:
     def __init__(self, service=None, trace_store=None, strategy_router=None, retrieval_pipeline=None):
         if service is None:
@@ -45,36 +56,116 @@ class EnterpriseRagGraph:
         self.strategy_router = strategy_router
         self.retrieval_pipeline = retrieval_pipeline
         self.trace_store = trace_store or debug_trace_store
+        self.graph = self._build_graph()
 
     async def run(self, state: RagState) -> RagResponse:
+        result = await self.graph.ainvoke({"rag_state": state})
+        return result["response"]
+
+    def _build_graph(self):
+        graph = StateGraph(EnterpriseRagGraphState)
+        graph.add_node("initialize", self.initialize_node)
+        graph.add_node("planner", self.planner_node)
+        graph.add_node("strategy_select", self.strategy_select_node)
+        graph.add_node("retrieve", self.retrieve_node)
+        graph.add_node("evaluate_context", self.evaluate_context_node)
+        graph.add_node("decide_next_action", self.decide_next_action_node)
+        graph.add_node("apply_retry", self.apply_retry_node)
+        graph.add_node("generate_answer", self.generate_answer_node)
+        graph.add_node("build_insufficient_evidence", self.build_insufficient_evidence_node)
+        graph.add_node("finalize_trace", self.finalize_trace_node)
+
+        graph.add_edge(START, "initialize")
+        graph.add_edge("initialize", "planner")
+        graph.add_edge("planner", "strategy_select")
+        graph.add_edge("strategy_select", "retrieve")
+        graph.add_edge("retrieve", "evaluate_context")
+        graph.add_edge("evaluate_context", "decide_next_action")
+        graph.add_conditional_edges(
+            "decide_next_action",
+            self.route_after_decision,
+            {
+                "retry": "apply_retry",
+                "generate": "generate_answer",
+                "insufficient_evidence": "build_insufficient_evidence",
+            },
+        )
+        graph.add_edge("apply_retry", "retrieve")
+        graph.add_edge("generate_answer", "finalize_trace")
+        graph.add_edge("build_insufficient_evidence", "finalize_trace")
+        graph.add_edge("finalize_trace", END)
+        return graph.compile()
+
+    def initialize_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
         started = perf_counter()
         started_at = self._now()
-        trace = self.initialize_trace(state, started_at)
-        self.planner(state, trace)
-        self.strategy_select(state, trace)
-        await self.retrieve(state, trace)
-        self.evaluate_context(state, trace)
-        self.decide_next_action(state)
+        return {
+            "started": started,
+            "started_at": started_at,
+            "trace": self.initialize_trace(graph_state["rag_state"], started_at),
+        }
 
-        while state.next_action in {"rewrite_query", "expand_top_k"}:
-            if state.retry_count >= state.max_retries:
-                state.next_action = "insufficient_evidence"
-                break
-            retry_action = state.next_action
-            if retry_action == "rewrite_query":
-                self.rewrite_query(state)
-            elif retry_action == "expand_top_k":
-                self.expand_top_k(state)
-            await self.retrieve(state, trace, reason=f"Retry after {retry_action}.")
-            self.evaluate_context(state, trace)
-            self.decide_next_action(state)
+    def planner_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        self.planner(graph_state["rag_state"], graph_state["trace"])
+        return {}
 
-        if state.next_action == "generate":
-            await self.generate_answer(state, trace)
+    def strategy_select_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        self.strategy_select(graph_state["rag_state"], graph_state["trace"])
+        return {}
+
+    async def retrieve_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        await self.retrieve(
+            graph_state["rag_state"],
+            graph_state["trace"],
+            reason=graph_state.get("retry_reason") or "Initial hybrid retrieval.",
+        )
+        return {"retry_reason": None}
+
+    def evaluate_context_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        self.evaluate_context(graph_state["rag_state"], graph_state["trace"])
+        return {}
+
+    def decide_next_action_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        self.decide_next_action(graph_state["rag_state"])
+        return {}
+
+    def apply_retry_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        state = graph_state["rag_state"]
+        retry_action = state.next_action
+        if retry_action == "rewrite_query":
+            self.rewrite_query(state)
+        elif retry_action == "expand_top_k":
+            self.expand_top_k(state)
         else:
-            self.build_insufficient_evidence(state)
+            return {"retry_reason": None}
+        return {"retry_reason": f"Retry after {retry_action}."}
 
-        return await self.finalize_trace(state, trace, started, started_at)
+    async def generate_answer_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        await self.generate_answer(graph_state["rag_state"], graph_state["trace"])
+        return {}
+
+    def build_insufficient_evidence_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        self.build_insufficient_evidence(graph_state["rag_state"])
+        return {}
+
+    async def finalize_trace_node(self, graph_state: EnterpriseRagGraphState) -> dict[str, Any]:
+        response = await self.finalize_trace(
+            graph_state["rag_state"],
+            graph_state["trace"],
+            graph_state["started"],
+            graph_state["started_at"],
+        )
+        return {"response": response}
+
+    def route_after_decision(self, graph_state: EnterpriseRagGraphState) -> str:
+        state = graph_state["rag_state"]
+        if state.next_action in {"rewrite_query", "expand_top_k"}:
+            if state.retry_count < state.max_retries:
+                return "retry"
+            return "insufficient_evidence"
+        if state.next_action == "generate":
+            return "generate"
+        return "insufficient_evidence"
 
     def initialize_trace(self, state: RagState, started_at: str) -> RagDebugTrace:
         return RagDebugTrace(

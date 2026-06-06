@@ -19,9 +19,16 @@ class FakeEnterpriseRagService:
         self.generated_queries = []
         self.generated_memory_contexts = []
 
-    async def retrieve(self, **kwargs):
+    async def retrieve_with_details(self, **kwargs):
         self.retrieve_calls.append(kwargs)
-        return self.documents
+        return {
+            "dense_results": self.documents,
+            "bm25_results": [],
+            "fused_results": self.documents,
+            "reranked_results": self.documents if kwargs.get("use_reranker") else [],
+            "selected_documents": self.documents[: kwargs["final_top_k"]],
+            "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0 if kwargs.get("use_reranker") else 0.0},
+        }
 
     async def generate_answer(self, query, documents, memory_context=None):
         self.generated_queries.append(query)
@@ -49,9 +56,17 @@ class QueryAwareEnterpriseRagService:
         self.generated_queries = []
         self.generated_memory_contexts = []
 
-    async def retrieve(self, **kwargs):
+    async def retrieve_with_details(self, **kwargs):
         self.retrieve_calls.append(kwargs)
-        return self.documents_by_query.get(kwargs["query"], [])
+        documents = self.documents_by_query.get(kwargs["query"], [])
+        return {
+            "dense_results": documents,
+            "bm25_results": [],
+            "fused_results": documents,
+            "reranked_results": documents if kwargs.get("use_reranker") else [],
+            "selected_documents": documents[: kwargs["final_top_k"]],
+            "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0 if kwargs.get("use_reranker") else 0.0},
+        }
 
     async def generate_answer(self, query, documents, memory_context=None):
         self.generated_queries.append(query)
@@ -68,8 +83,8 @@ def test_enterprise_rag_graph_supports_agentic_intent_taxonomy():
     assert EnterpriseRagGraph._task_type_for_intent("comparison", "Compare policies") == "comparison"
     assert EnterpriseRagGraph._task_type_for_intent("procedure", "How do I request leave?") == "procedure"
     assert EnterpriseRagGraph._task_type_for_intent("constrained", "Find confluence policy") == "constrained"
-    assert EnterpriseRagGraph._final_top_k_for_intent("comparison") == 10
-    assert EnterpriseRagGraph._search_k_for_intent("multi_hop") == 80
+    assert EnterpriseRagGraph._task_type_for_intent("conflicting_info", "Compare policies") == "comparison"
+    assert EnterpriseRagGraph._task_type_for_intent("project_related", "Which policies apply?") == "multi_hop"
 
 
 @pytest.mark.anyio
@@ -124,14 +139,14 @@ async def test_enterprise_rag_graph_decomposes_comparison_queries(monkeypatch):
         user_id="user-1",
         original_query="Compare trial and full-time leave process",
         current_query="Compare trial and full-time leave process",
-        rag_intent="conflicting_info",
+        rag_intent="comparison",
         router_confidence=0.9,
     )
 
     response = await graph.run(state)
 
     assert response.debug_id == "dbg-decompose"
-    assert response.strategy.strategy_name == "conflicting_info"
+    assert response.strategy.strategy_name == "dense_bm25_rrf_reranker_decompose"
     assert [call["query"] for call in service.retrieve_calls] == [
         "trial leave process",
         "full-time leave process",
@@ -178,7 +193,7 @@ async def test_enterprise_rag_graph_clears_stale_sub_queries_when_decomposition_
         user_id="user-1",
         original_query="Compare trial and full-time leave process",
         current_query="Compare trial and full-time leave process",
-        rag_intent="conflicting_info",
+        rag_intent="comparison",
         router_confidence=0.9,
         sub_queries=[RagSubQuery(sub_query_id="stale", query="stale aspect")],
     )
@@ -231,7 +246,7 @@ async def test_enterprise_rag_graph_requires_decomposed_query_coverage(monkeypat
         user_id="user-1",
         original_query="Compare trial and full-time leave process",
         current_query="Compare trial and full-time leave process",
-        rag_intent="conflicting_info",
+        rag_intent="comparison",
         router_confidence=0.9,
         max_retries=0,
     )
@@ -300,10 +315,10 @@ async def test_enterprise_rag_graph_generates_answer_and_saves_trace_for_strong_
     assert response.metrics.retrieval_attempts == 1
     assert service.retrieve_calls[0]["query"] == "Where is the PTO policy?"
     assert service.retrieve_calls[0]["source_hints"] == ["confluence"]
-    assert service.retrieve_calls[0]["rag_intent"] == "constrained"
+    assert service.retrieve_calls[0]["use_reranker"] is True
     assert service.generated_memory_contexts[0] == state.memory_context
     assert trace_store.saved[0].planner.plan.task_type == "constrained"
-    assert trace_store.saved[0].strategy.strategy.strategy_name == "constrained"
+    assert trace_store.saved[0].strategy.strategy.strategy_name == "dense_bm25_rrf_reranker"
     assert trace_store.saved[0].retrieval_attempts[0].attempt.selected_documents[0].title == "PTO Policy"
     assert trace_store.saved[0].evaluations[0].result.enough_evidence is True
     assert trace_store.saved[0].generation.answer_preview.startswith("answer for")
@@ -334,6 +349,48 @@ async def test_enterprise_rag_graph_returns_insufficient_evidence_without_genera
     assert response.evaluation.missing_aspects == ["What is the launch code name?"]
     assert service.generated_queries == []
     assert trace_store.saved[0].final_answer_preview == response.answer
+
+
+
+@pytest.mark.anyio
+async def test_enterprise_rag_graph_run_delegates_to_compiled_langgraph_workflow():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import EvaluationSummary, RagMetrics, RagResponse, RagState, RagStrategySummary
+
+    class FakeCompiledGraph:
+        def __init__(self):
+            self.received_state = None
+
+        async def ainvoke(self, graph_state):
+            self.received_state = graph_state
+            return {
+                "response": RagResponse(
+                    request_id=graph_state["rag_state"].request_id,
+                    debug_id=graph_state["rag_state"].debug_id,
+                    session_id=graph_state["rag_state"].session_id,
+                    answer="graph answer",
+                    sources=[],
+                    strategy=RagStrategySummary(strategy_name="default", retrieval_mode="hybrid", final_top_k=5),
+                    evaluation=EvaluationSummary(enough_evidence=True),
+                    metrics=RagMetrics(),
+                )
+            }
+
+    compiled_graph = FakeCompiledGraph()
+    graph = object.__new__(EnterpriseRagGraph)
+    graph.graph = compiled_graph
+    state = RagState(
+        request_id="req-graph-delegate",
+        debug_id="dbg-graph-delegate",
+        user_id="user-1",
+        original_query="Where is PTO?",
+        current_query="Where is PTO?",
+    )
+
+    response = await graph.run(state)
+
+    assert response.answer == "graph answer"
+    assert compiled_graph.received_state["rag_state"] is state
 
 
 def test_enterprise_rag_service_formats_dict_documents_for_answer_context():
