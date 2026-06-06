@@ -189,7 +189,7 @@ def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[st
     samples = [build_ragas_sample_dict(record) for record in records if not record.get("generation_error")]
     sample_indexes = [index for index, record in enumerate(records) if not record.get("generation_error")]
     try:
-        results = evaluator(samples)
+        results = list(evaluator(samples))
     except Exception as exc:
         for index in sample_indexes:
             records[index]["ragas_error"] = str(exc)
@@ -199,16 +199,23 @@ def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[st
         if isinstance(result, Exception):
             records[index]["ragas_error"] = str(result)
         else:
-            records[index]["ragas_scores"] = {
+            scores = {
                 key: float(value)
                 for key, value in dict(result).items()
-                if value is not None
+                if isinstance(value, int | float) and not isinstance(value, bool)
             }
+            if scores:
+                records[index]["ragas_scores"] = scores
+            else:
+                records[index]["ragas_error"] = "RAGAS returned no numeric scores"
+
+    for index in sample_indexes[len(results) :]:
+        records[index]["ragas_error"] = "RAGAS returned fewer results than samples"
     return records
 
 
 def summarize_generation_records(records: list[dict[str, Any]], intended_count: int) -> dict[str, Any]:
-    valid_records = [record for record in records if isinstance(record.get("ragas_scores"), dict)]
+    valid_records = [record for record in records if isinstance(record.get("ragas_scores"), dict) and record["ragas_scores"]]
     latencies = [float(record["latency_ms"]) for record in records if isinstance(record.get("latency_ms"), int | float)]
     valid_ratio = len(valid_records) / intended_count if intended_count else 1.0
     summary: dict[str, Any] = {

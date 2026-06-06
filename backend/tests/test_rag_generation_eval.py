@@ -327,18 +327,60 @@ def test_apply_ragas_scores_attaches_scores_and_records_metric_errors():
     assert scored[1]["ragas_error"] == "judge failed"
 
 
+def test_apply_ragas_scores_marks_empty_score_result_as_error():
+    records = [
+        {
+            "question_id": "q1",
+            "question": "Where is the PTO policy?",
+            "retrieved_contexts": ["The HR handbook contains the PTO policy."],
+            "answer": "The PTO policy is in the HR handbook.",
+            "reference": "The PTO policy is in the HR handbook.",
+        }
+    ]
+
+    scored = apply_ragas_scores(records, lambda samples: [{}])
+
+    assert scored[0]["ragas_error"] == "RAGAS returned no numeric scores"
+    assert not scored[0].get("ragas_scores")
+
+
+def test_apply_ragas_scores_marks_missing_results_as_errors():
+    records = [
+        {
+            "question_id": "q1",
+            "question": "Where is the PTO policy?",
+            "retrieved_contexts": ["The HR handbook contains the PTO policy."],
+            "answer": "The PTO policy is in the HR handbook.",
+            "reference": "The PTO policy is in the HR handbook.",
+        },
+        {
+            "question_id": "q2",
+            "question": "Unknown?",
+            "retrieved_contexts": [],
+            "answer": "",
+            "reference": "Reference",
+        },
+    ]
+
+    scored = apply_ragas_scores(records, lambda samples: [{"faithfulness": 0.9}])
+
+    assert scored[0]["ragas_scores"] == {"faithfulness": 0.9}
+    assert scored[1]["ragas_error"] == "RAGAS returned fewer results than samples"
+
+
 def test_summarize_generation_records_marks_incomplete_below_valid_score_threshold():
     records = [
         {"ragas_scores": {"faithfulness": 0.9, "answer_relevancy": 0.8}, "latency_ms": 100.0},
         {"ragas_error": "rate limit", "latency_ms": 200.0},
+        {"ragas_scores": {}, "latency_ms": 300.0},
     ]
 
-    summary = summarize_generation_records(records, intended_count=2)
+    summary = summarize_generation_records(records, intended_count=3)
 
-    assert summary["questions"] == 2
+    assert summary["questions"] == 3
     assert summary["valid_ragas_scores"] == 1
     assert summary["status"] == "incomplete"
-    assert summary["average_latency_ms"] == 150.0
+    assert summary["average_latency_ms"] == 200.0
     assert summary["faithfulness"] == 0.9
     assert summary["answer_relevancy"] == 0.8
 
@@ -363,9 +405,33 @@ def test_write_generation_outputs_creates_standard_files(tmp_path):
             "source_chunk_ids": ["chunk_a"],
             "ragas_scores": {"faithfulness": 0.9},
             "latency_ms": 100.0,
-        }
+        },
+        {
+            "question_id": "q2",
+            "question_type": "fact_lookup",
+            "question": "Unknown?",
+            "reference": "Reference",
+            "answer": "",
+            "retrieved_contexts": [],
+            "source_doc_ids": [],
+            "source_chunk_ids": [],
+            "ragas_error": "RAGAS returned no numeric scores",
+            "latency_ms": 200.0,
+        },
+        {
+            "question_id": "q3",
+            "question_type": "fact_lookup",
+            "question": "Missing?",
+            "reference": "Reference",
+            "answer": "",
+            "retrieved_contexts": [],
+            "source_doc_ids": [],
+            "source_chunk_ids": [],
+            "ragas_error": "RAGAS returned fewer results than samples",
+            "latency_ms": 300.0,
+        },
     ]
-    summary = summarize_generation_records(records, intended_count=1)
+    summary = summarize_generation_records(records, intended_count=3)
 
     from scripts.evaluate_enterprise_rag_generation import write_generation_outputs
 
@@ -378,6 +444,14 @@ def test_write_generation_outputs_creates_standard_files(tmp_path):
     assert (run_dir / "report.md").exists()
     saved_summary = json.loads((run_dir / "generation_ragas_summary.json").read_text(encoding="utf-8"))
     assert saved_summary["faithfulness"] == 0.9
+    failures = [
+        json.loads(line)
+        for line in (run_dir / "generation_ragas_failures.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [failure["ragas_error"] for failure in failures] == [
+        "RAGAS returned no numeric scores",
+        "RAGAS returned fewer results than samples",
+    ]
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "RAG Generation Evaluation Report" in report
     assert "gpt-4o" in report
