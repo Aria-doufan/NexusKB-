@@ -64,6 +64,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_generation_rag_intent(question_type: str) -> str:
+    mapping = {
+        "semantic": "semantic_query",
+        "semantic_query": "semantic_query",
+        "multi_hop": "multi_hop",
+        "comparison": "comparison",
+        "conflicting_info": "comparison",
+        "project_related": "multi_hop",
+        "procedure": "procedure",
+        "constrained": "constrained",
+        "completeness": "constrained",
+        "high_level": "semantic_query",
+        "fact_lookup": "fact_lookup",
+        "lookup": "fact_lookup",
+    }
+    return mapping.get((question_type or "").strip(), question_type or "unknown")
+
+
 def build_rag_state(question: Question) -> RagState:
     suffix = uuid4().hex[:12]
     return RagState(
@@ -73,17 +91,35 @@ def build_rag_state(question: Question) -> RagState:
         user_id="rag-eval-user",
         original_query=question.question,
         current_query=question.question,
-        rag_intent=question.question_type,
+        rag_intent=normalize_generation_rag_intent(question.question_type),
         source_hints=question.source_types,
         router_confidence=0.9,
         router_reason="EnterpriseRAG-Bench generation evaluation fixture.",
     )
 
 
-def trace_contexts(trace: Any) -> list[str]:
+def final_trace_documents(trace: Any, response: RagResponse) -> list[Any]:
+    allowed_ids = _response_source_ids(response)
+    if not allowed_ids:
+        return []
+
+    documents: list[Any] = []
+    seen_document_ids: set[tuple[str, ...]] = set()
+    for document in _trace_selected_documents(trace):
+        document_ids = _document_source_ids(document)
+        if not document_ids or document_ids.isdisjoint(allowed_ids):
+            continue
+        dedupe_key = tuple(sorted(document_ids))
+        if dedupe_key not in seen_document_ids:
+            documents.append(document)
+            seen_document_ids.add(dedupe_key)
+    return documents
+
+
+def trace_contexts(trace: Any, response: RagResponse) -> list[str]:
     contexts: list[str] = []
     seen: set[str] = set()
-    for document in _trace_selected_documents(trace):
+    for document in final_trace_documents(trace, response):
         text = (getattr(document, "text", None) or getattr(document, "child_text", None) or "").strip()
         if text and text not in seen:
             contexts.append(text)
@@ -91,12 +127,12 @@ def trace_contexts(trace: Any) -> list[str]:
     return contexts
 
 
-def trace_source_ids(trace: Any) -> tuple[list[str], list[str]]:
+def trace_source_ids(trace: Any, response: RagResponse) -> tuple[list[str], list[str]]:
     doc_ids: list[str] = []
     chunk_ids: list[str] = []
     seen_doc_ids: set[str] = set()
     seen_chunk_ids: set[str] = set()
-    for document in _trace_selected_documents(trace):
+    for document in final_trace_documents(trace, response):
         doc_id = (getattr(document, "parent_doc_id", None) or "").strip()
         chunk_id = (getattr(document, "parent_chunk_id", None) or "").strip()
         if doc_id and doc_id not in seen_doc_ids:
@@ -114,14 +150,14 @@ def response_to_generation_record(
     trace: Any,
     latency_ms: float,
 ) -> dict[str, Any]:
-    source_doc_ids, source_chunk_ids = trace_source_ids(trace)
+    source_doc_ids, source_chunk_ids = trace_source_ids(trace, response)
     return {
         "question_id": question.question_id,
         "question_type": question.question_type,
         "question": question.question,
         "reference": question.gold_answer,
         "answer": response.answer,
-        "retrieved_contexts": trace_contexts(trace),
+        "retrieved_contexts": trace_contexts(trace, response),
         "source_doc_ids": source_doc_ids,
         "source_chunk_ids": source_chunk_ids,
         "latency_ms": round(float(latency_ms), 4),
@@ -262,6 +298,25 @@ async def async_main() -> int:
 
 def main() -> int:
     return asyncio.run(async_main())
+
+
+def _response_source_ids(response: RagResponse) -> set[str]:
+    source_ids: set[str] = set()
+    for source in response.sources or []:
+        for field_name in ("parent_doc_id", "parent_chunk_id", "source_id"):
+            value = (getattr(source, field_name, None) or "").strip()
+            if value:
+                source_ids.add(value)
+    return source_ids
+
+
+def _document_source_ids(document: Any) -> set[str]:
+    source_ids: set[str] = set()
+    for field_name in ("parent_doc_id", "parent_chunk_id", "source_id", "candidate_id", "id"):
+        value = (getattr(document, field_name, None) or "").strip()
+        if value:
+            source_ids.add(value)
+    return source_ids
 
 
 def _trace_selected_documents(trace: Any) -> list[Any]:

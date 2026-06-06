@@ -8,7 +8,9 @@ from app.schemas.rag import RagMetrics, RagResponse, RagSource, RagStrategySumma
 from scripts.evaluate_enterprise_hybrid_retrieval import Question
 from scripts.evaluate_enterprise_rag_generation import (
     CapturingTraceStore,
+    build_rag_state,
     build_ragas_sample_dict,
+    normalize_generation_rag_intent,
     response_to_generation_record,
     summarize_generation_records,
 )
@@ -52,6 +54,22 @@ def make_response():
     )
 
 
+def test_normalize_generation_rag_intent_maps_benchmark_question_types():
+    assert normalize_generation_rag_intent("semantic") == "semantic_query"
+    assert normalize_generation_rag_intent("conflicting_info") == "comparison"
+    assert normalize_generation_rag_intent("project_related") == "multi_hop"
+    assert normalize_generation_rag_intent("lookup") == "fact_lookup"
+
+
+def test_build_rag_state_normalizes_benchmark_question_type_for_router():
+    question = make_question()
+    question.question_type = "semantic"
+
+    state = build_rag_state(question)
+
+    assert state.rag_intent == "semantic_query"
+
+
 def test_response_to_generation_record_uses_trace_context_texts():
     trace = SimpleNamespace(
         retrieval_attempts=[
@@ -63,7 +81,15 @@ def test_response_to_generation_record_uses_trace_context_texts():
                             child_text="PTO policy child text.",
                             parent_doc_id="doc_a",
                             parent_chunk_id="chunk_a",
-                        )
+                            source_id="chunk_a",
+                        ),
+                        SimpleNamespace(
+                            text="The engineering handbook contains deployment policy.",
+                            child_text="Deployment policy child text.",
+                            parent_doc_id="doc_b",
+                            parent_chunk_id="chunk_b",
+                            source_id="chunk_b",
+                        ),
                     ]
                 )
             )
