@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-dir", type=Path, default=DEFAULT_BASELINE_DIR)
     parser.add_argument("--judge-provider", default=os.getenv("RAGAS_JUDGE_PROVIDER", "openai"))
     parser.add_argument("--judge-model", default=os.getenv("RAGAS_JUDGE_MODEL", "gpt-4o"))
+    parser.add_argument("--embedding-model", default=os.getenv("RAGAS_EMBEDDING_MODEL", "text-embedding-3-small"))
     parser.add_argument("--ci", action="store_true", help="Record CI mode in config without enforcing regressions yet.")
     parser.add_argument(
         "--fail-on-regression",
@@ -206,6 +207,9 @@ def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[st
             }
             if scores:
                 records[index]["ragas_scores"] = scores
+                missing_metrics = [metric for metric in RAGAS_METRIC_NAMES if metric not in scores]
+                if missing_metrics:
+                    records[index]["ragas_error"] = f"RAGAS missing metrics: {', '.join(missing_metrics)}"
             else:
                 records[index]["ragas_error"] = "RAGAS returned no numeric scores"
 
@@ -214,28 +218,44 @@ def apply_ragas_scores(records: list[dict[str, Any]], evaluator) -> list[dict[st
     return records
 
 
+def _is_numeric_score(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def has_valid_ragas_scores(record: dict[str, Any]) -> bool:
-    return isinstance(record.get("ragas_scores"), dict) and bool(record["ragas_scores"])
+    scores = record.get("ragas_scores")
+    return isinstance(scores, dict) and all(_is_numeric_score(scores.get(metric)) for metric in RAGAS_METRIC_NAMES)
 
 
 def summarize_generation_records(records: list[dict[str, Any]], intended_count: int) -> dict[str, Any]:
     valid_records = [record for record in records if has_valid_ragas_scores(record)]
     latencies = [float(record["latency_ms"]) for record in records if isinstance(record.get("latency_ms"), int | float)]
     valid_ratio = len(valid_records) / intended_count if intended_count else 1.0
+    metric_values: dict[str, list[float]] = {metric: [] for metric in RAGAS_METRIC_NAMES}
+    for record in records:
+        scores = record.get("ragas_scores")
+        if not isinstance(scores, dict):
+            continue
+        for metric_name in RAGAS_METRIC_NAMES:
+            value = scores.get(metric_name)
+            if _is_numeric_score(value):
+                metric_values[metric_name].append(float(value))
+    metric_coverage = {metric: len(values) for metric, values in metric_values.items()}
+    denominator = intended_count if intended_count else 1
     summary: dict[str, Any] = {
         "questions": len(records),
         "intended_questions": intended_count,
         "valid_ragas_scores": len(valid_records),
         "status": "complete" if valid_ratio >= 0.8 else "incomplete",
+        "failures": sum(1 for record in records if record.get("generation_error") or record.get("ragas_error") or not has_valid_ragas_scores(record)),
         "average_latency_ms": round(sum(latencies) / len(latencies), 4) if latencies else 0.0,
+        "metric_coverage": metric_coverage,
+        "metric_coverage_rate": {
+            metric: round(count / denominator, 4) for metric, count in metric_coverage.items()
+        },
     }
 
-    for metric_name in RAGAS_METRIC_NAMES:
-        values = []
-        for record in valid_records:
-            value = record["ragas_scores"].get(metric_name)
-            if isinstance(value, int | float):
-                values.append(float(value))
+    for metric_name, values in metric_values.items():
         if values:
             summary[metric_name] = round(sum(values) / len(values), 4)
     return summary
@@ -272,7 +292,7 @@ async def generate_records(questions: list[Question]) -> list[dict[str, Any]]:
     return records
 
 
-def _build_ragas_evaluation_components(judge_model: str):
+def _build_ragas_evaluation_components(judge_model: str, embedding_model: str):
     from datasets import Dataset
     from langchain_openai.chat_models import ChatOpenAI
     from langchain_openai.embeddings import OpenAIEmbeddings
@@ -282,7 +302,7 @@ def _build_ragas_evaluation_components(judge_model: str):
     from ragas.metrics import AnswerCorrectness, AnswerRelevancy, ContextPrecision, ContextRecall, Faithfulness
 
     llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
-    embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model="text-embedding-3-small"))
+    embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model=embedding_model))
     metrics = [
         Faithfulness(llm=llm),
         AnswerRelevancy(llm=llm, embeddings=embeddings),
@@ -293,12 +313,17 @@ def _build_ragas_evaluation_components(judge_model: str):
     return Dataset, evaluate, metrics, llm
 
 
-def run_ragas_evaluation(records: list[dict[str, Any]], judge_provider: str, judge_model: str) -> list[dict[str, Any]]:
+def run_ragas_evaluation(
+    records: list[dict[str, Any]],
+    judge_provider: str,
+    judge_model: str,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
     if judge_provider != "openai":
         raise ValueError(f"Unsupported RAGAS judge provider for this version: {judge_provider}")
 
     def evaluator(samples: list[dict[str, Any]]) -> list[dict[str, float]]:
-        Dataset, evaluate, metrics, llm = _build_ragas_evaluation_components(judge_model)
+        Dataset, evaluate, metrics, llm = _build_ragas_evaluation_components(judge_model, embedding_model)
 
         dataset = Dataset.from_list(samples)
         result = evaluate(
@@ -338,10 +363,24 @@ def render_generation_report(
         "| Metric | Current | Baseline |",
         "| --- | ---: | ---: |",
     ]
-    for metric_name in ["questions", "valid_ragas_scores", "average_latency_ms", *RAGAS_METRIC_NAMES]:
+    for metric_name in ["status", "questions", "valid_ragas_scores", "failures", "average_latency_ms", *RAGAS_METRIC_NAMES]:
         current = summary.get(metric_name, "")
         baseline = "" if baseline_summary is None else baseline_summary.get(metric_name, "")
         lines.append(f"| {metric_name} | {current} | {baseline} |")
+
+    lines.extend(
+        [
+            "",
+            "## Metric Coverage",
+            "",
+            "| Metric | Count | Rate |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    coverage = summary.get("metric_coverage") or {}
+    coverage_rate = summary.get("metric_coverage_rate") or {}
+    for metric_name in RAGAS_METRIC_NAMES:
+        lines.append(f"| {metric_name} | {coverage.get(metric_name, 0)} | {coverage_rate.get(metric_name, 0.0)} |")
     return "\n".join(lines) + "\n"
 
 
@@ -355,12 +394,13 @@ def write_generation_outputs(
     run_dir = output_root / utc_run_id("generation")
     run_dir.mkdir(parents=True, exist_ok=False)
     baseline_summary = load_json_if_exists(baseline_dir / "generation_ragas_summary.json")
-    report = render_generation_report(config, summary, baseline_summary)
     failures = [
         record
         for record in records
         if record.get("generation_error") or record.get("ragas_error") or not has_valid_ragas_scores(record)
     ]
+    summary["failures"] = len(failures)
+    report = render_generation_report(config, summary, baseline_summary)
 
     (run_dir / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir / "generation_ragas_summary.json").write_text(
@@ -383,13 +423,14 @@ async def async_main() -> int:
     args = parse_args()
     questions = load_questions(args.questions_path, limit=args.limit)
     records = await generate_records(questions)
-    records = run_ragas_evaluation(records, args.judge_provider, args.judge_model)
+    records = run_ragas_evaluation(records, args.judge_provider, args.judge_model, args.embedding_model)
     summary = summarize_generation_records(records, intended_count=len(questions))
     config = {
         "questions_path": str(args.questions_path),
         "limit": args.limit,
         "judge_provider": args.judge_provider,
         "judge_model": args.judge_model,
+        "embedding_model": args.embedding_model,
         "ci": args.ci,
         "fail_on_regression": args.fail_on_regression,
         "git_commit": short_git_commit(),

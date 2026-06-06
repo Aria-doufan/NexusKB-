@@ -19,6 +19,15 @@ from scripts.evaluate_enterprise_rag_generation import (
 )
 
 
+FULL_RAGAS_SCORES = {
+    "faithfulness": 0.9,
+    "answer_relevancy": 0.8,
+    "answer_correctness": 0.7,
+    "context_precision": 0.6,
+    "context_recall": 0.5,
+}
+
+
 def make_question():
     return Question(
         question_id="q1",
@@ -273,7 +282,10 @@ def test_build_ragas_evaluation_components_configures_llm_embeddings_and_metric_
         ),
     )
 
-    dataset_class, evaluate, metrics, llm = rag_generation_eval._build_ragas_evaluation_components("gpt-4o-mini")
+    dataset_class, evaluate, metrics, llm = rag_generation_eval._build_ragas_evaluation_components(
+        "gpt-4o-mini",
+        "text-embedding-3-large",
+    )
 
     assert dataset_class is FakeDataset
     assert evaluate is sys.modules["ragas"].evaluate
@@ -281,8 +293,8 @@ def test_build_ragas_evaluation_components_configures_llm_embeddings_and_metric_
     assert llm is calls[0][1]["llm"]
     answer_relevancy = next(kwargs for name, kwargs in calls if name == "answer_relevancy")
     answer_correctness = next(kwargs for name, kwargs in calls if name == "answer_correctness")
-    assert answer_relevancy["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-small"}
-    assert answer_correctness["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-small"}
+    assert answer_relevancy["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-large"}
+    assert answer_correctness["embeddings"].embedding_model.kwargs == {"model": "text-embedding-3-large"}
     assert [metric.name for metric in metrics] == [
         "faithfulness",
         "answer_relevancy",
@@ -313,17 +325,13 @@ def test_apply_ragas_scores_attaches_scores_and_records_metric_errors():
     def fake_evaluator(samples):
         assert samples[0]["user_input"] == "Where is the PTO policy?"
         return [
-            {"faithfulness": 0.9, "answer_relevancy": 0.8, "answer_correctness": 0.7},
+            FULL_RAGAS_SCORES,
             RuntimeError("judge failed"),
         ]
 
     scored = apply_ragas_scores(records, fake_evaluator)
 
-    assert scored[0]["ragas_scores"] == {
-        "faithfulness": 0.9,
-        "answer_relevancy": 0.8,
-        "answer_correctness": 0.7,
-    }
+    assert scored[0]["ragas_scores"] == FULL_RAGAS_SCORES
     assert scored[1]["ragas_error"] == "judge failed"
 
 
@@ -342,6 +350,25 @@ def test_apply_ragas_scores_marks_empty_score_result_as_error():
 
     assert scored[0]["ragas_error"] == "RAGAS returned no numeric scores"
     assert not scored[0].get("ragas_scores")
+
+
+def test_apply_ragas_scores_preserves_partial_scores_and_marks_missing_metrics():
+    records = [
+        {
+            "question_id": "q1",
+            "question": "Where is the PTO policy?",
+            "retrieved_contexts": ["The HR handbook contains the PTO policy."],
+            "answer": "The PTO policy is in the HR handbook.",
+            "reference": "The PTO policy is in the HR handbook.",
+        }
+    ]
+
+    scored = apply_ragas_scores(records, lambda samples: [{"faithfulness": 0.9}])
+
+    assert scored[0]["ragas_scores"] == {"faithfulness": 0.9}
+    assert "RAGAS missing metrics" in scored[0]["ragas_error"]
+    assert "answer_relevancy" in scored[0]["ragas_error"]
+    assert not rag_generation_eval.has_valid_ragas_scores(scored[0])
 
 
 def test_apply_ragas_scores_marks_missing_results_as_errors():
@@ -370,8 +397,8 @@ def test_apply_ragas_scores_marks_missing_results_as_errors():
 
 def test_summarize_generation_records_marks_incomplete_below_valid_score_threshold():
     records = [
-        {"ragas_scores": {"faithfulness": 0.9, "answer_relevancy": 0.8}, "latency_ms": 100.0},
-        {"ragas_error": "rate limit", "latency_ms": 200.0},
+        {"ragas_scores": FULL_RAGAS_SCORES, "latency_ms": 100.0},
+        {"ragas_scores": {"faithfulness": 0.3}, "ragas_error": "RAGAS missing metrics", "latency_ms": 200.0},
         {"ragas_scores": {}, "latency_ms": 300.0},
     ]
 
@@ -380,9 +407,24 @@ def test_summarize_generation_records_marks_incomplete_below_valid_score_thresho
     assert summary["questions"] == 3
     assert summary["valid_ragas_scores"] == 1
     assert summary["status"] == "incomplete"
+    assert summary["failures"] == 2
     assert summary["average_latency_ms"] == 200.0
-    assert summary["faithfulness"] == 0.9
+    assert summary["faithfulness"] == 0.6
     assert summary["answer_relevancy"] == 0.8
+    assert summary["metric_coverage"] == {
+        "faithfulness": 2,
+        "answer_relevancy": 1,
+        "answer_correctness": 1,
+        "context_precision": 1,
+        "context_recall": 1,
+    }
+    assert summary["metric_coverage_rate"] == {
+        "faithfulness": 0.6667,
+        "answer_relevancy": 0.3333,
+        "answer_correctness": 0.3333,
+        "context_precision": 0.3333,
+        "context_recall": 0.3333,
+    }
 
 
 def test_write_generation_outputs_creates_standard_files(tmp_path):
@@ -403,35 +445,11 @@ def test_write_generation_outputs_creates_standard_files(tmp_path):
             "retrieved_contexts": ["HR handbook PTO policy."],
             "source_doc_ids": ["doc_a"],
             "source_chunk_ids": ["chunk_a"],
-            "ragas_scores": {"faithfulness": 0.9},
+            "ragas_scores": FULL_RAGAS_SCORES,
             "latency_ms": 100.0,
         },
-        {
-            "question_id": "q2",
-            "question_type": "fact_lookup",
-            "question": "Unknown?",
-            "reference": "Reference",
-            "answer": "",
-            "retrieved_contexts": [],
-            "source_doc_ids": [],
-            "source_chunk_ids": [],
-            "ragas_error": "RAGAS returned no numeric scores",
-            "latency_ms": 200.0,
-        },
-        {
-            "question_id": "q3",
-            "question_type": "fact_lookup",
-            "question": "Missing?",
-            "reference": "Reference",
-            "answer": "",
-            "retrieved_contexts": [],
-            "source_doc_ids": [],
-            "source_chunk_ids": [],
-            "ragas_error": "RAGAS returned fewer results than samples",
-            "latency_ms": 300.0,
-        },
     ]
-    summary = summarize_generation_records(records, intended_count=3)
+    summary = summarize_generation_records(records, intended_count=1)
 
     from scripts.evaluate_enterprise_rag_generation import write_generation_outputs
 
@@ -444,17 +462,20 @@ def test_write_generation_outputs_creates_standard_files(tmp_path):
     assert (run_dir / "report.md").exists()
     saved_summary = json.loads((run_dir / "generation_ragas_summary.json").read_text(encoding="utf-8"))
     assert saved_summary["faithfulness"] == 0.9
+    assert saved_summary["status"] == "complete"
+    assert saved_summary["failures"] == 0
     failures = [
         json.loads(line)
         for line in (run_dir / "generation_ragas_failures.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert [failure["ragas_error"] for failure in failures] == [
-        "RAGAS returned no numeric scores",
-        "RAGAS returned fewer results than samples",
-    ]
+    assert failures == []
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "RAG Generation Evaluation Report" in report
     assert "gpt-4o" in report
+    assert "| status | complete |" in report
+    assert "| failures | 0 |" in report
+    assert "## Metric Coverage" in report
+    assert "| faithfulness | 1 | 1.0 |" in report
 
 
 def test_write_generation_outputs_includes_empty_ragas_scores_in_failures(tmp_path):

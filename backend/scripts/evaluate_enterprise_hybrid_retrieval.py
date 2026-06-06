@@ -805,6 +805,15 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
     return summary
 
 
+def is_low_precision_failure(row: dict[str, Any], max_k: int) -> bool:
+    precision = row.get(f"precision@{max_k}", 0.0)
+    expected_count = len(row.get("expected_doc_ids") or [])
+    if expected_count > 0:
+        max_possible = min(expected_count, max_k) / max_k
+        return max_possible > 0 and precision / max_possible < 0.5
+    return precision < 0.2
+
+
 def classify_failures(row: dict[str, Any], k_values: list[int]) -> list[str]:
     max_k = max(k_values)
     reasons: list[str] = []
@@ -814,7 +823,7 @@ def classify_failures(row: dict[str, Any], k_values: list[int]) -> list[str]:
         reasons.append("no_gold_hit")
     if row.get(f"recall@{max_k}", 0.0) < 0.5:
         reasons.append("low_recall")
-    if row.get(f"precision@{max_k}", 0.0) < 0.2:
+    if is_low_precision_failure(row, max_k):
         reasons.append("low_precision")
     if row.get(f"ndcg@{max_k}", 0.0) < 0.5:
         reasons.append("low_ndcg")

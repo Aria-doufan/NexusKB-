@@ -507,6 +507,25 @@ def test_strategy_matrix_decompose_preserves_single_query_behavior_for_simple_qu
     assert detail["evidence_coverage"] == 1.0
 
 
+def test_classify_failures_does_not_mark_top1_single_gold_hit_as_low_precision_at_large_k():
+    row = {
+        "expected_doc_ids": ["doc_a"],
+        "dedup_parent_results": 20,
+        "hit@1": 1,
+        "hit@20": 1,
+        "recall@20": 1.0,
+        "precision@20": 0.05,
+        "ndcg@20": 1.0,
+        "ap@20": 1.0,
+        "required_evidence_groups_count": 0,
+        "reranker_used": False,
+    }
+
+    reasons = classify_failures(row, [1, 20])
+
+    assert "low_precision" not in reasons
+
+
 def test_classify_failures_returns_multiple_retrieval_failure_reasons():
     row = {
         "dedup_parent_results": 3,

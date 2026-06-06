@@ -113,7 +113,7 @@ Generation baseline with RAGAS and GPT judge:
 
 ```powershell
 $env:OPENAI_API_KEY = "<your key>"
-conda run -n nexuskb python backend/scripts/evaluate_enterprise_rag_generation.py --limit 50 --judge-provider openai --judge-model gpt-4o
+conda run -n nexuskb python backend/scripts/evaluate_enterprise_rag_generation.py --limit 50 --judge-provider openai --judge-model gpt-4o --embedding-model text-embedding-3-small
 ```
 
 Generated run artifacts are written under `backend/data/eval_outputs/`.
