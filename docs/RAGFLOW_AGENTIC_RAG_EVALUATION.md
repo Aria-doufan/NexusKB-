@@ -99,6 +99,25 @@
 
 每次新增策略必须和 baseline 对比，不单独汇报孤立指标。
 
+## Offline Baseline Evaluation Commands
+
+The offline baseline is split into retrieval and generation tracks.
+
+Retrieval baseline:
+
+```powershell
+conda run -n nexuskb python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --method strategy_matrix_decompose --standard-output
+```
+
+Generation baseline with RAGAS and GPT judge:
+
+```powershell
+$env:OPENAI_API_KEY = "<your key>"
+conda run -n nexuskb python backend/scripts/evaluate_enterprise_rag_generation.py --limit 50 --judge-provider openai --judge-model gpt-4o
+```
+
+Generated run artifacts are written under `backend/data/eval_outputs/`. The current manually approved baseline can be stored under `backend/data/eval_baselines/current/` for report delta comparison.
+
 ## 5. 检索指标公式
 
 ### 5.1 Hit@K
