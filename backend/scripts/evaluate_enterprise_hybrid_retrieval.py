@@ -47,6 +47,7 @@ from scripts.rag_eval_reporting import load_json_if_exists, render_retrieval_rep
 DEFAULT_QUESTIONS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "questions.jsonl"
 DEFAULT_CHILD_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "child_chunks_parent_child.jsonl"
 DEFAULT_PARENT_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "parent_chunks_parent_child.jsonl"
+DEFAULT_GRAPH_DIR = BACKEND_DIR / "data" / "enterprise_rag_bench" / "graph"
 DEFAULT_PERSIST_DIR = BACKEND_DIR / "data" / "chromadb_enterprise_parent_child"
 DEFAULT_OUTPUT_DIR = BACKEND_DIR / "data" / "enterprise_rag_bench" / "eval"
 DEFAULT_COLLECTION_NAME = "enterprise_rag_bench_parent_child"
@@ -77,8 +78,12 @@ METHODS = [
     "chroma_bm25_rrf",
     "chroma_bm25_rrf_source_boost",
     "chroma_bm25_rrf_reranker",
+    "chroma_bm25_graph_rrf",
+    "chroma_bm25_graph_rrf_reranker",
     "strategy_matrix",
     "strategy_matrix_decompose",
+    "strategy_matrix_graph",
+    "strategy_matrix_decompose_graph",
     "hybrid_bm25_rrf",
     "hybrid_bm25_rrf_reranker",
 ]
@@ -109,6 +114,9 @@ class Candidate:
     vector_score: float | None = None
     bm25_rank: int | None = None
     bm25_score: float | None = None
+    graph_rank: int | None = None
+    graph_score: float | None = None
+    evidence_chunk_ids: list[str] = field(default_factory=list)
     fused_score: float = 0.0
     reranker_score: float | None = None
 
@@ -201,6 +209,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--chroma-search-k", type=int, default=50)
     parser.add_argument("--bm25-search-k", type=int, default=50)
+    parser.add_argument("--graph-dir", type=Path, default=DEFAULT_GRAPH_DIR)
+    parser.add_argument("--graph-search-k", type=int, default=40)
+    parser.add_argument("--graph-depth", type=int, default=2)
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument("--source-boost", type=float, default=SOURCE_HINT_SOFT_BOOST)
     parser.add_argument("--k-values", default="1,5,10,20")
@@ -279,19 +290,52 @@ def method_needs_bm25(method: str) -> bool:
     return normalize_method(method) != "chroma_only"
 
 
+def method_needs_graph(method: str) -> bool:
+    return normalize_method(method) in {
+        "chroma_bm25_graph_rrf",
+        "chroma_bm25_graph_rrf_reranker",
+        "strategy_matrix_graph",
+        "strategy_matrix_decompose_graph",
+    }
+
+
+def validate_graph_cli_args(args: argparse.Namespace, normalized_method: str) -> None:
+    if not method_needs_graph(normalized_method):
+        return
+    if args.graph_search_k <= 0:
+        raise ValueError("--graph-search-k must be greater than 0 for graph methods")
+    if args.graph_depth < 0:
+        raise ValueError("--graph-depth must be greater than or equal to 0 for graph methods")
+
+
 def method_needs_reranker(method: str) -> bool:
     return normalize_method(method) in {
         "chroma_bm25_rrf_reranker",
+        "chroma_bm25_graph_rrf_reranker",
         "strategy_matrix",
         "strategy_matrix_decompose",
+        "strategy_matrix_graph",
+        "strategy_matrix_decompose_graph",
     }
+
+
+def method_uses_decompose(method: str, question: Question) -> bool:
+    return normalize_method(method) in {
+        "strategy_matrix_decompose",
+        "strategy_matrix_decompose_graph",
+    } and question.question_type in {"multi_hop", "comparison"}
 
 
 def should_rerank_question(method: str, question: Question) -> bool:
     normalized = normalize_method(method)
-    if normalized == "chroma_bm25_rrf_reranker":
+    if normalized in {"chroma_bm25_rrf_reranker", "chroma_bm25_graph_rrf_reranker"}:
         return True
-    if normalized in {"strategy_matrix", "strategy_matrix_decompose"}:
+    if normalized in {
+        "strategy_matrix",
+        "strategy_matrix_decompose",
+        "strategy_matrix_graph",
+        "strategy_matrix_decompose_graph",
+    }:
         return question.question_type in COMPLEX_QUESTION_TYPES
     return False
 
@@ -301,6 +345,8 @@ def should_apply_source_boost(method: str) -> bool:
         "chroma_bm25_rrf_source_boost",
         "strategy_matrix",
         "strategy_matrix_decompose",
+        "strategy_matrix_graph",
+        "strategy_matrix_decompose_graph",
     }
 
 
@@ -422,18 +468,55 @@ def chroma_search(
     return candidates
 
 
+def graph_search(
+    graph_index: Any,
+    query: str,
+    top_k: int,
+    depth: int,
+    source_hints: list[str],
+) -> list[Candidate]:
+    results = graph_index.retrieve_sync(
+        query=query,
+        top_k=top_k,
+        depth=depth,
+        source_hints=source_hints,
+    )
+    candidates: list[Candidate] = []
+    for rank, result in enumerate(results, start=1):
+        candidates.append(
+            Candidate(
+                chunk_id=result.parent_chunk_id,
+                parent_doc_id=result.parent_doc_id or "",
+                parent_chunk_id=result.parent_chunk_id,
+                source_type=result.source_type or "",
+                title=result.title or "",
+                section_heading=result.section_heading or "",
+                text=result.text or "",
+                graph_rank=rank,
+                graph_score=float(result.score),
+                evidence_chunk_ids=[result.parent_chunk_id] if result.parent_chunk_id else [],
+            )
+        )
+    return candidates
+
+
 def reciprocal_rank(ranked_doc_ids: list[str], expected_doc_ids: set[str], max_k: int) -> float:
     return reciprocal_rank_at_k(ranked_doc_ids, expected_doc_ids, max_k)
 
 
 def evidence_coverage_at_k(
-    ranked_chunk_ids: list[str],
+    ranked_chunk_ids: list[str] | list[set[str]],
     required_evidence_groups: list[list[str]],
     max_k: int,
 ) -> float:
     if not required_evidence_groups:
         return 0.0
-    top_ids = set(ranked_chunk_ids[:max_k])
+    top_ids: set[str] = set()
+    for evidence_ids in ranked_chunk_ids[:max_k]:
+        if isinstance(evidence_ids, set):
+            top_ids.update(evidence_ids)
+        elif evidence_ids:
+            top_ids.add(evidence_ids)
     covered = 0
     for group in required_evidence_groups:
         if top_ids.intersection(group):
@@ -457,22 +540,34 @@ def fuse_by_rrf(
     rrf_k: int,
     source_hints: list[str] | None = None,
     source_boost: float = SOURCE_HINT_SOFT_BOOST,
+    graph_candidates: Iterable[Candidate] | None = None,
 ) -> list[Candidate]:
-    by_chunk_id: dict[str, Candidate] = {}
+    graph_candidates = list(graph_candidates or [])
+    by_candidate_key: dict[str, Candidate] = {}
+    keys_by_parent_chunk_id: dict[str, list[str]] = defaultdict(list)
 
-    def merge(candidate: Candidate) -> Candidate:
+    def create_candidate(candidate: Candidate) -> Candidate:
+        return Candidate(
+            chunk_id=candidate.chunk_id,
+            parent_doc_id=candidate.parent_doc_id,
+            parent_chunk_id=candidate.parent_chunk_id,
+            source_type=candidate.source_type,
+            title=candidate.title,
+            section_heading=candidate.section_heading,
+            text=candidate.text,
+            evidence_chunk_ids=list(candidate.evidence_chunk_ids),
+        )
+
+    def add_parent_key(candidate: Candidate, key: str) -> None:
+        if candidate.parent_chunk_id and key not in keys_by_parent_chunk_id[candidate.parent_chunk_id]:
+            keys_by_parent_chunk_id[candidate.parent_chunk_id].append(key)
+
+    def merge_child(candidate: Candidate) -> Candidate:
         key = candidate.chunk_id
-        if key not in by_chunk_id:
-            by_chunk_id[key] = Candidate(
-                chunk_id=candidate.chunk_id,
-                parent_doc_id=candidate.parent_doc_id,
-                parent_chunk_id=candidate.parent_chunk_id,
-                source_type=candidate.source_type,
-                title=candidate.title,
-                section_heading=candidate.section_heading,
-                text=candidate.text,
-            )
-        existing = by_chunk_id[key]
+        if key not in by_candidate_key:
+            by_candidate_key[key] = create_candidate(candidate)
+            add_parent_key(candidate, key)
+        existing = by_candidate_key[key]
         if candidate.vector_rank is not None:
             existing.vector_rank = candidate.vector_rank
             existing.vector_score = candidate.vector_score
@@ -483,18 +578,55 @@ def fuse_by_rrf(
             existing.fused_score += 1.0 / (rrf_k + candidate.bm25_rank)
         return existing
 
+    def best_existing_rank(candidate: Candidate) -> int:
+        ranks = [
+            rank
+            for rank in (candidate.vector_rank, candidate.bm25_rank, candidate.graph_rank)
+            if rank is not None
+        ]
+        return min(ranks, default=sys.maxsize)
+
+    def representative_for_graph(candidate: Candidate) -> Candidate:
+        parent_keys = keys_by_parent_chunk_id.get(candidate.parent_chunk_id, [])
+        parent_candidates = [by_candidate_key[key] for key in parent_keys if key in by_candidate_key]
+        if parent_candidates:
+            return max(
+                parent_candidates,
+                key=lambda item: (item.fused_score, -best_existing_rank(item)),
+            )
+
+        key = candidate.parent_chunk_id or candidate.chunk_id
+        if key not in by_candidate_key:
+            by_candidate_key[key] = create_candidate(candidate)
+            add_parent_key(candidate, key)
+        return by_candidate_key[key]
+
+    def merge_graph(candidate: Candidate) -> Candidate:
+        existing = representative_for_graph(candidate)
+        graph_evidence_ids = [candidate.chunk_id, candidate.parent_chunk_id, *candidate.evidence_chunk_ids]
+        for evidence_id in graph_evidence_ids:
+            if evidence_id and evidence_id not in existing.evidence_chunk_ids:
+                existing.evidence_chunk_ids.append(evidence_id)
+        if candidate.graph_rank is not None:
+            existing.graph_rank = candidate.graph_rank
+            existing.graph_score = candidate.graph_score
+            existing.fused_score += 1.0 / (rrf_k + candidate.graph_rank)
+        return existing
+
     for candidate in vector_candidates:
-        merge(candidate)
+        merge_child(candidate)
     for candidate in bm25_candidates:
-        merge(candidate)
+        merge_child(candidate)
+    for candidate in graph_candidates:
+        merge_graph(candidate)
 
     source_hint_set = {source for source in (source_hints or []) if source}
     if source_hint_set:
-        for candidate in by_chunk_id.values():
+        for candidate in by_candidate_key.values():
             if candidate.source_type in source_hint_set:
                 candidate.fused_score *= 1.0 + source_boost
 
-    return sorted(by_chunk_id.values(), key=lambda item: item.fused_score, reverse=True)
+    return sorted(by_candidate_key.values(), key=lambda item: item.fused_score, reverse=True)
 
 
 def dedup_parent_doc_ids(candidates: list[Candidate]) -> tuple[list[str], list[Candidate]]:
@@ -541,12 +673,73 @@ def ranked_chunk_ids_for_coverage(
     return ranked_chunk_ids
 
 
+def candidate_evidence_ids(candidate: Candidate) -> set[str]:
+    evidence_ids = {candidate.chunk_id, *candidate.evidence_chunk_ids}
+    return {evidence_id for evidence_id in evidence_ids if evidence_id}
+
+
+def ranked_evidence_ids_for_coverage(
+    ranked_candidates: list[Candidate],
+    parent_candidates: list[Candidate],
+    reranker_used: bool,
+) -> list[set[str]]:
+    if not reranker_used:
+        return [candidate_evidence_ids(candidate) for candidate in ranked_candidates if candidate.chunk_id]
+
+    ranked_parent_doc_ids = {candidate.parent_doc_id for candidate in parent_candidates}
+    seen_chunk_ids: set[str] = set()
+    ranked_evidence_ids: list[set[str]] = []
+
+    for candidate in parent_candidates:
+        if candidate.chunk_id:
+            ranked_evidence_ids.append(candidate_evidence_ids(candidate))
+            seen_chunk_ids.add(candidate.chunk_id)
+
+    for candidate in ranked_candidates:
+        if (
+            not candidate.parent_doc_id
+            or candidate.parent_doc_id not in ranked_parent_doc_ids
+            or not candidate.chunk_id
+            or candidate.chunk_id in seen_chunk_ids
+        ):
+            continue
+        ranked_evidence_ids.append(candidate_evidence_ids(candidate))
+        seen_chunk_ids.add(candidate.chunk_id)
+
+    return ranked_evidence_ids
+
+
 def maybe_load_reranker(model_path: str, device: str | None, max_length: int) -> Any:
     return Qwen3CausalReranker(
         model_path=model_path,
         device=device,
         max_length=max_length,
     )
+
+
+
+def maybe_load_graph_index(method: str, graph_dir: Path) -> Any | None:
+    if not method_needs_graph(normalize_method(method)):
+        return None
+
+    from app.rag.graph_index_service import GraphIndexService
+
+    graph_index = GraphIndexService(graph_dir)
+    graph_index.load_sync()
+    validate_graph_index_loaded(graph_dir, graph_index)
+    return graph_index
+
+
+def validate_graph_index_loaded(graph_dir: Path, graph_index: Any) -> None:
+    if not graph_dir.exists():
+        raise ValueError(f"Graph index directory does not exist: {graph_dir}")
+
+    parent_chunks = getattr(graph_index, "parent_chunks", None) or {}
+    entities = getattr(graph_index, "entities", None) or {}
+    if not parent_chunks or not entities:
+        raise ValueError(
+            f"No graph data loaded from {graph_dir}: expected non-empty parent_chunks and entities"
+        )
 
 
 def rerank_parent_candidates(
@@ -587,6 +780,9 @@ def candidate_to_hit(candidate: Candidate, rank: int) -> dict[str, Any]:
         "vector_score": candidate.vector_score,
         "bm25_rank": candidate.bm25_rank,
         "bm25_score": candidate.bm25_score,
+        "graph_rank": candidate.graph_rank,
+        "graph_score": candidate.graph_score,
+        "evidence_chunk_ids": candidate.evidence_chunk_ids,
         "fused_score": candidate.fused_score,
         "reranker_score": candidate.reranker_score,
         "preview": candidate.text[:240].replace("\n", " "),
@@ -608,39 +804,58 @@ def evaluate_question(
     parent_texts: dict[str, str],
     reranker_candidate_k: int,
     reranker_batch_size: int,
+    graph_index: Any | None = None,
+    graph_search_k: int = 0,
+    graph_depth: int = 1,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     normalized_method = normalize_method(method)
     vector_candidates: list[Candidate] = []
     bm25_candidates: list[Candidate] = []
+    graph_candidates: list[Candidate] = []
+    graph_source_hints = question.source_types if should_apply_source_boost(normalized_method) else []
 
-    if normalized_method == "strategy_matrix_decompose" and question.question_type in {"multi_hop", "comparison"}:
+    if method_needs_graph(normalized_method) and graph_index is None:
+        raise ValueError(f"Method {method} requires graph index, but graph_index is not initialized")
+
+    if method_uses_decompose(normalized_method, question):
         if store is None:
             raise ValueError(f"Method {method} requires Chroma, but store is not initialized")
         if bm25 is None:
             raise ValueError(f"Method {method} requires BM25, but index is not initialized")
 
-        merged_by_chunk_id: dict[str, Candidate] = {}
+        merged_by_candidate_key: dict[str, Candidate] = {}
         for sub_query in decompose_question_for_eval(question):
             sub_vector_candidates = chroma_search(store, sub_query, chroma_search_k, where)
             sub_bm25_candidates = bm25.search(sub_query, bm25_search_k)
+            sub_graph_candidates = []
+            if method_needs_graph(normalized_method):
+                sub_graph_candidates = graph_search(
+                    graph_index=graph_index,
+                    query=sub_query,
+                    top_k=graph_search_k,
+                    depth=graph_depth,
+                    source_hints=graph_source_hints,
+                )
             vector_candidates.extend(sub_vector_candidates)
             bm25_candidates.extend(sub_bm25_candidates)
+            graph_candidates.extend(sub_graph_candidates)
             sub_ranked_candidates = fuse_by_rrf(
                 vector_candidates=sub_vector_candidates,
                 bm25_candidates=sub_bm25_candidates,
                 rrf_k=rrf_k,
-                source_hints=question.source_types,
+                source_hints=graph_source_hints,
                 source_boost=source_boost,
+                graph_candidates=sub_graph_candidates,
             )
             for candidate in sub_ranked_candidates:
                 if not candidate.chunk_id:
                     continue
-                existing = merged_by_chunk_id.get(candidate.chunk_id)
+                existing = merged_by_candidate_key.get(candidate.chunk_id)
                 if existing is None or candidate.fused_score > existing.fused_score:
-                    merged_by_chunk_id[candidate.chunk_id] = candidate
+                    merged_by_candidate_key[candidate.chunk_id] = candidate
         ranked_candidates = sorted(
-            merged_by_chunk_id.values(),
+            merged_by_candidate_key.values(),
             key=lambda item: item.fused_score,
             reverse=True,
         )
@@ -655,6 +870,15 @@ def evaluate_question(
                 raise ValueError(f"Method {method} requires BM25, but index is not initialized")
             bm25_candidates = bm25.search(question.question, bm25_search_k)
 
+        if method_needs_graph(normalized_method):
+            graph_candidates = graph_search(
+                graph_index=graph_index,
+                query=question.question,
+                top_k=graph_search_k,
+                depth=graph_depth,
+                source_hints=graph_source_hints,
+            )
+
         if normalized_method == "chroma_only":
             ranked_candidates = vector_candidates
         elif normalized_method == "bm25_only":
@@ -666,6 +890,7 @@ def evaluate_question(
                 rrf_k=rrf_k,
                 source_hints=question.source_types if should_apply_source_boost(normalized_method) else None,
                 source_boost=source_boost,
+                graph_candidates=graph_candidates,
             )
 
     ranked_doc_ids, parent_candidates = dedup_parent_doc_ids(ranked_candidates)
@@ -690,6 +915,11 @@ def evaluate_question(
         parent_candidates=parent_candidates,
         reranker_used=reranker_used,
     )
+    ranked_evidence_ids = ranked_evidence_ids_for_coverage(
+        ranked_candidates=ranked_candidates,
+        parent_candidates=parent_candidates,
+        reranker_used=reranker_used,
+    )
     required_evidence_groups_count = len(question.required_evidence_groups)
 
     detail: dict[str, Any] = {
@@ -704,7 +934,7 @@ def evaluate_question(
         "retrieved_chunk_ids": ranked_chunk_ids[:max_k],
         "required_evidence_groups_count": required_evidence_groups_count,
         "evidence_coverage": evidence_coverage_at_k(
-            ranked_chunk_ids,
+            ranked_evidence_ids,
             question.required_evidence_groups,
             max_k,
         ),
@@ -715,6 +945,7 @@ def evaluate_question(
         "latency_ms": elapsed_ms,
         "vector_child_results": len(vector_candidates),
         "bm25_child_results": len(bm25_candidates),
+        "graph_results": len(graph_candidates),
         "fused_child_results": len(ranked_candidates),
         "dedup_parent_results": len(ranked_doc_ids),
         "source_boost_applied": should_apply_source_boost(normalized_method),
@@ -735,7 +966,7 @@ def evaluate_question(
         detail[f"ap@{k}"] = average_precision_at_k(ranked_doc_ids, expected, k)
         detail[f"matched_doc_ids@{k}"] = matched
         detail[f"evidence_coverage@{k}"] = evidence_coverage_at_k(
-            ranked_chunk_ids,
+            ranked_evidence_ids,
             question.required_evidence_groups,
             k,
         )
@@ -970,6 +1201,9 @@ def write_standard_retrieval_outputs(
         "persist_dir": str(args.persist_dir),
         "reranker_model_path": args.reranker_model_path if method_needs_reranker(normalize_method(args.method)) else None,
         "reranker_candidate_k": args.reranker_candidate_k,
+        "graph_dir": str(args.graph_dir) if method_needs_graph(normalize_method(args.method)) else None,
+        "graph_search_k": args.graph_search_k if method_needs_graph(normalize_method(args.method)) else None,
+        "graph_depth": args.graph_depth if method_needs_graph(normalize_method(args.method)) else None,
         "judge_provider": None,
         "judge_model": None,
         "ci": args.ci,
@@ -996,6 +1230,7 @@ def write_standard_retrieval_outputs(
 def main() -> None:
     args = parse_args()
     normalized_method = normalize_method(args.method)
+    validate_graph_cli_args(args, normalized_method)
     k_values = parse_k_values(args.k_values)
     questions = load_questions(args.questions_path, args.limit)
     if not questions:
@@ -1032,6 +1267,15 @@ def main() -> None:
             max_length=args.reranker_max_length,
         )
 
+    graph_index = None
+    if method_needs_graph(normalized_method):
+        print(f"Loading graph index from {args.graph_dir} ...", flush=True)
+        graph_index = maybe_load_graph_index(normalized_method, args.graph_dir)
+        print(
+            f"Loaded graph index with {len(graph_index.entities)} entities and {len(graph_index.relations)} relations.",
+            flush=True,
+        )
+
     started = time.perf_counter()
     details: list[dict[str, Any]] = []
     for index, question in enumerate(questions, start=1):
@@ -1050,6 +1294,9 @@ def main() -> None:
             parent_texts=parent_texts,
             reranker_candidate_k=args.reranker_candidate_k,
             reranker_batch_size=args.reranker_batch_size,
+            graph_index=graph_index,
+            graph_search_k=args.graph_search_k,
+            graph_depth=args.graph_depth,
         )
         details.append(detail)
         print(
@@ -1070,6 +1317,9 @@ def main() -> None:
             "embedding_model": args.embedding_model,
             "chroma_search_k_child_chunks": args.chroma_search_k,
             "bm25_search_k_child_chunks": args.bm25_search_k,
+            "graph_dir": str(args.graph_dir.resolve()) if graph_index is not None else None,
+            "graph_search_k": args.graph_search_k if graph_index is not None else None,
+            "graph_depth": args.graph_depth if graph_index is not None else None,
             "rrf_k": args.rrf_k,
             "source_boost": args.source_boost if should_apply_source_boost(normalized_method) else None,
             "where_source_type": args.where_source_type,
@@ -1077,7 +1327,12 @@ def main() -> None:
             "reranker_candidate_k": args.reranker_candidate_k if reranker_model is not None else None,
             "reranker_batch_size": args.reranker_batch_size if reranker_model is not None else None,
             "reranker_complex_question_types": sorted(COMPLEX_QUESTION_TYPES)
-            if normalized_method in {"strategy_matrix", "strategy_matrix_decompose"}
+            if normalized_method in {
+                "strategy_matrix",
+                "strategy_matrix_decompose",
+                "strategy_matrix_graph",
+                "strategy_matrix_decompose_graph",
+            }
             else None,
             "failures": len(failures),
             "elapsed_sec": round(time.perf_counter() - started, 2),

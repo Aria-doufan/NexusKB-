@@ -4,9 +4,13 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import scripts.evaluate_enterprise_hybrid_retrieval as retrieval_eval
 from scripts.evaluate_enterprise_hybrid_retrieval import (
+    DEFAULT_GRAPH_DIR,
     Candidate,
     Question,
     classify_failures,
@@ -14,10 +18,14 @@ from scripts.evaluate_enterprise_hybrid_retrieval import (
     evaluate_question,
     evidence_coverage_at_k,
     load_questions,
+    maybe_load_graph_index,
+    method_needs_graph,
     method_needs_reranker,
     normalize_method,
+    parse_args,
     should_rerank_question,
     summarize,
+    validate_graph_index_loaded,
     write_outputs,
 )
 
@@ -42,6 +50,23 @@ class FakeBM25:
         return self.results_by_query.get(query, [])[:k]
 
 
+class FakeGraphIndex:
+    def __init__(self, results_by_query):
+        self.results_by_query = results_by_query
+        self.calls = []
+
+    def retrieve_sync(self, query, top_k, depth, source_hints=None):
+        self.calls.append(
+            {
+                "query": query,
+                "top_k": top_k,
+                "depth": depth,
+                "source_hints": source_hints,
+            }
+        )
+        return self.results_by_query.get(query, [])[:top_k]
+
+
 class FakeReranker:
     def __init__(self, scores_by_text):
         self.scores_by_text = scores_by_text
@@ -50,6 +75,12 @@ class FakeReranker:
     def predict(self, pairs, batch_size=1):
         self.pairs.extend(pairs)
         return [self.scores_by_text.get(document, 0.0) for _query, document in pairs]
+
+
+class FakeLoadedGraphIndex:
+    def __init__(self, parent_chunks=None, entities=None):
+        self.parent_chunks = parent_chunks or {}
+        self.entities = entities or {}
 
 
 
@@ -81,6 +112,23 @@ def make_bm25_candidate(chunk_id, parent_doc_id="doc", source_type="policy"):
     )
 
 
+def make_graph_result(parent_chunk_id, parent_doc_id="doc", source_type="policy", score=2.0):
+    from app.rag.graph_index_service import GraphRetrievedDocument
+
+    return GraphRetrievedDocument(
+        parent_chunk_id=parent_chunk_id,
+        parent_doc_id=parent_doc_id,
+        source_type=source_type,
+        title="Graph Title",
+        section_heading="Graph Section",
+        text="graph text",
+        score=score,
+        matched_entities=["policy"],
+        matched_relations=["policy__requires__approval"],
+        reason="graph_entity_relation_match",
+    )
+
+
 
 def test_normalize_method_accepts_strategy_matrix_decompose():
     assert normalize_method("strategy_matrix_decompose") == "strategy_matrix_decompose"
@@ -102,6 +150,465 @@ def test_strategy_matrix_decompose_loads_and_applies_reranker_for_complex_questi
         )
 
         assert should_rerank_question("strategy_matrix_decompose", question) is True
+
+
+def test_graph_method_metadata_requires_graph_but_not_reranker():
+    assert normalize_method("chroma_bm25_graph_rrf") == "chroma_bm25_graph_rrf"
+    assert method_needs_graph("chroma_bm25_graph_rrf") is True
+    assert method_needs_reranker("chroma_bm25_graph_rrf") is False
+
+
+
+def test_parse_args_defaults_graph_configuration(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["evaluate_enterprise_hybrid_retrieval.py"])
+
+    args = parse_args()
+
+    assert args.graph_dir == DEFAULT_GRAPH_DIR
+    assert args.graph_search_k == 40
+    assert args.graph_depth == 2
+
+
+@pytest.mark.parametrize("graph_search_k", [0, -1])
+def test_graph_method_rejects_invalid_graph_search_k_before_loading_questions(monkeypatch, graph_search_k):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_enterprise_hybrid_retrieval.py",
+            "--method",
+            "chroma_bm25_graph_rrf",
+            "--graph-search-k",
+            str(graph_search_k),
+        ],
+    )
+    monkeypatch.setattr(
+        retrieval_eval,
+        "load_questions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("load_questions should not run")),
+    )
+
+    with pytest.raises(ValueError, match="--graph-search-k must be greater than 0"):
+        retrieval_eval.main()
+
+
+@pytest.mark.parametrize("graph_depth", [-1, -2])
+def test_graph_method_rejects_negative_graph_depth_before_loading_questions(monkeypatch, graph_depth):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_enterprise_hybrid_retrieval.py",
+            "--method",
+            "chroma_bm25_graph_rrf",
+            "--graph-depth",
+            str(graph_depth),
+        ],
+    )
+    monkeypatch.setattr(
+        retrieval_eval,
+        "load_questions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("load_questions should not run")),
+    )
+
+    with pytest.raises(ValueError, match="--graph-depth must be greater than or equal to 0"):
+        retrieval_eval.main()
+
+
+
+def test_maybe_load_graph_index_returns_none_for_non_graph_methods(tmp_path):
+    assert maybe_load_graph_index("chroma_bm25_rrf", tmp_path / "missing_graph") is None
+
+
+
+def test_maybe_load_graph_index_loads_non_empty_graph_data(tmp_path):
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    (graph_dir / "entities.jsonl").write_text(
+        json.dumps(
+            {
+                "entity_id": "leave_approval",
+                "name": "leave approval",
+                "normalized_name": "leave approval",
+                "entity_type": "policy",
+                "source_chunk_ids": ["parent_a"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (graph_dir / "relations.jsonl").write_text("", encoding="utf-8")
+    (graph_dir / "entity_chunk_map.json").write_text(
+        json.dumps({"leave_approval": ["parent_a"]}),
+        encoding="utf-8",
+    )
+    (graph_dir / "parent_chunks.json").write_text(
+        json.dumps({"parent_a": {"parent_doc_id": "doc_a", "text": "Leave approval text"}}),
+        encoding="utf-8",
+    )
+
+    graph_index = maybe_load_graph_index("chroma_bm25_graph_rrf", graph_dir)
+
+    assert graph_index is not None
+    assert "leave_approval" in graph_index.entities
+    assert "parent_a" in graph_index.parent_chunks
+
+
+def test_validate_graph_index_loaded_fails_for_missing_graph_dir(tmp_path):
+    graph_dir = tmp_path / "missing_graph"
+    graph_index = FakeLoadedGraphIndex(parent_chunks={"parent_a": object()}, entities={"entity_a": object()})
+
+    with pytest.raises(ValueError, match="Graph index directory does not exist"):
+        validate_graph_index_loaded(graph_dir, graph_index)
+
+
+@pytest.mark.parametrize(
+    ("parent_chunks", "entities"),
+    [
+        ({}, {"entity_a": object()}),
+        ({"parent_a": object()}, {}),
+    ],
+)
+def test_validate_graph_index_loaded_fails_for_empty_graph_data(tmp_path, parent_chunks, entities):
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    graph_index = FakeLoadedGraphIndex(parent_chunks=parent_chunks, entities=entities)
+
+    with pytest.raises(ValueError, match="No graph data loaded"):
+        validate_graph_index_loaded(graph_dir, graph_index)
+
+
+
+def test_validate_graph_index_loaded_accepts_non_empty_graph_data(tmp_path):
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    graph_index = FakeLoadedGraphIndex(parent_chunks={"parent_a": object()}, entities={"entity_a": object()})
+
+    validate_graph_index_loaded(graph_dir, graph_index)
+
+
+
+def test_graph_method_raises_when_graph_index_is_missing():
+    question = Question(
+        question_id="q_graph_missing",
+        question_type="multi_hop",
+        source_types=[],
+        question="How does leave approval work?",
+        expected_doc_ids=[],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[],
+    )
+
+    try:
+        evaluate_question(
+            method="chroma_bm25_graph_rrf",
+            store=FakeStore({"How does leave approval work?": []}),
+            bm25=FakeBM25({"How does leave approval work?": []}),
+            question=question,
+            chroma_search_k=5,
+            bm25_search_k=5,
+            rrf_k=60,
+            source_boost=0.15,
+            k_values=[1],
+            where=None,
+            reranker_model=None,
+            parent_texts={},
+            reranker_candidate_k=20,
+            reranker_batch_size=4,
+            graph_index=None,
+            graph_search_k=5,
+            graph_depth=2,
+        )
+    except ValueError as exc:
+        assert "requires graph index" in str(exc)
+    else:
+        raise AssertionError("Expected graph method to require graph_index")
+
+
+
+def test_graph_rrf_fuses_vector_child_and_graph_parent_for_same_parent_chunk():
+    question = Question(
+        question_id="q_graph_parent_fusion",
+        question_type="multi_hop",
+        source_types=["policy"],
+        question="How does probation leave approval work?",
+        expected_doc_ids=["doc_graph"],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[["child_graph"], ["parent_graph"]],
+    )
+    vector_document = SimpleNamespace(
+        metadata={
+            "chunk_id": "child_graph",
+            "parent_doc_id": "doc_graph",
+            "parent_chunk_id": "parent_graph",
+            "source_type": "policy",
+            "title": "Vector Title",
+            "section_heading": "Vector Section",
+        },
+        page_content="vector child text",
+    )
+    store = FakeStore({"How does probation leave approval work?": [(vector_document, 0.1)]})
+    bm25 = FakeBM25({"How does probation leave approval work?": []})
+    graph = FakeGraphIndex(
+        {
+            "How does probation leave approval work?": [
+                make_graph_result("parent_graph", parent_doc_id="doc_graph", score=3.0)
+            ]
+        }
+    )
+
+    detail = evaluate_question(
+        method="chroma_bm25_graph_rrf",
+        store=store,
+        bm25=bm25,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1, 2],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+        graph_index=graph,
+        graph_search_k=5,
+        graph_depth=2,
+    )
+
+    top_hit = detail["top_hits"][0]
+    assert detail["fused_child_results"] == 1
+    assert detail["retrieved_parent_doc_ids"] == ["doc_graph"]
+    assert detail["retrieved_chunk_ids"] == ["child_graph"]
+    assert top_hit["chunk_id"] == "child_graph"
+    assert top_hit["parent_chunk_id"] == "parent_graph"
+    assert top_hit["vector_rank"] == 1
+    assert top_hit["graph_rank"] == 1
+    assert top_hit["graph_score"] == 3.0
+    assert detail["evidence_coverage@1"] == 1.0
+    assert detail["evidence_coverage"] == 1.0
+
+
+
+def test_graph_rrf_preserves_sibling_vector_children_when_graph_matches_parent_chunk():
+    question = Question(
+        question_id="q_graph_sibling_child_fusion",
+        question_type="multi_hop",
+        source_types=["policy"],
+        question="How do related policy details fit together?",
+        expected_doc_ids=["doc_graph"],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[["child_graph_a"], ["child_graph_b"]],
+    )
+    vector_documents = [
+        SimpleNamespace(
+            metadata={
+                "chunk_id": "child_graph_a",
+                "parent_doc_id": "doc_graph",
+                "parent_chunk_id": "parent_graph",
+                "source_type": "policy",
+                "title": "Vector Title",
+                "section_heading": "Vector Section A",
+            },
+            page_content="first vector child text",
+        ),
+        SimpleNamespace(
+            metadata={
+                "chunk_id": "child_graph_b",
+                "parent_doc_id": "doc_graph",
+                "parent_chunk_id": "parent_graph",
+                "source_type": "policy",
+                "title": "Vector Title",
+                "section_heading": "Vector Section B",
+            },
+            page_content="second vector child text",
+        ),
+    ]
+    store = FakeStore(
+        {"How do related policy details fit together?": [(vector_documents[0], 0.1), (vector_documents[1], 0.2)]}
+    )
+    bm25 = FakeBM25({"How do related policy details fit together?": []})
+    graph = FakeGraphIndex(
+        {
+            "How do related policy details fit together?": [
+                make_graph_result("parent_graph", parent_doc_id="doc_graph", score=3.0)
+            ]
+        }
+    )
+
+    detail = evaluate_question(
+        method="chroma_bm25_graph_rrf",
+        store=store,
+        bm25=bm25,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1, 2],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+        graph_index=graph,
+        graph_search_k=5,
+        graph_depth=2,
+    )
+
+    assert detail["retrieved_chunk_ids"] == ["child_graph_a", "child_graph_b"]
+    assert detail["fused_child_results"] == 2
+    assert detail["evidence_coverage@2"] == 1.0
+    assert detail["evidence_coverage"] == 1.0
+    assert detail["top_hits"][0]["graph_rank"] == 1
+    assert detail["top_hits"][0]["graph_score"] == 3.0
+
+
+def test_graph_rrf_includes_graph_candidates_in_fusion():
+    question = Question(
+        question_id="q_graph",
+        question_type="multi_hop",
+        source_types=["policy"],
+        question="How does probation leave approval work?",
+        expected_doc_ids=["doc_graph"],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[["parent_graph"]],
+    )
+    store = FakeStore({"How does probation leave approval work?": []})
+    bm25 = FakeBM25({"How does probation leave approval work?": []})
+    graph = FakeGraphIndex(
+        {
+            "How does probation leave approval work?": [
+                make_graph_result("parent_graph", parent_doc_id="doc_graph", score=3.0)
+            ]
+        }
+    )
+
+    detail = evaluate_question(
+        method="chroma_bm25_graph_rrf",
+        store=store,
+        bm25=bm25,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+        graph_index=graph,
+        graph_search_k=5,
+        graph_depth=2,
+    )
+
+    assert graph.calls == [
+        {
+            "query": "How does probation leave approval work?",
+            "top_k": 5,
+            "depth": 2,
+            "source_hints": [],
+        }
+    ]
+    assert detail["graph_results"] == 1
+    assert detail["retrieved_parent_doc_ids"] == ["doc_graph"]
+    assert detail["retrieved_chunk_ids"] == ["parent_graph"]
+    assert detail["hit@1"] == 1
+
+
+def test_strategy_matrix_graph_passes_source_hints_when_source_boost_applies():
+    question = Question(
+        question_id="q_strategy_graph",
+        question_type="semantic",
+        source_types=["policy"],
+        question="What policy applies?",
+        expected_doc_ids=["doc_graph"],
+        gold_answer="",
+        answer_facts=[],
+        required_evidence_groups=[],
+    )
+    store = FakeStore({"What policy applies?": []})
+    bm25 = FakeBM25({"What policy applies?": []})
+    graph = FakeGraphIndex(
+        {"What policy applies?": [make_graph_result("parent_graph", parent_doc_id="doc_graph", score=3.0)]}
+    )
+
+    detail = evaluate_question(
+        method="strategy_matrix_graph",
+        store=store,
+        bm25=bm25,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+        graph_index=graph,
+        graph_search_k=5,
+        graph_depth=2,
+    )
+
+    assert graph.calls[0]["source_hints"] == ["policy"]
+    assert detail["source_boost_applied"] is True
+
+
+
+def test_strategy_matrix_decompose_graph_runs_graph_for_each_sub_query():
+    question = Question(
+        question_id="q_graph_decompose",
+        question_type="comparison",
+        source_types=["policy"],
+        question="Compare leave policies",
+        expected_doc_ids=["doc_a", "doc_b"],
+        gold_answer="",
+        answer_facts=["Probation leave", "Regular leave"],
+        required_evidence_groups=[["parent_a"], ["parent_b"]],
+    )
+    store = FakeStore({"Probation leave": [], "Regular leave": []})
+    bm25 = FakeBM25({"Probation leave": [], "Regular leave": []})
+    graph = FakeGraphIndex(
+        {
+            "Probation leave": [make_graph_result("parent_a", parent_doc_id="doc_a", score=3.0)],
+            "Regular leave": [make_graph_result("parent_b", parent_doc_id="doc_b", score=2.5)],
+        }
+    )
+
+    detail = evaluate_question(
+        method="strategy_matrix_decompose_graph",
+        store=store,
+        bm25=bm25,
+        question=question,
+        chroma_search_k=5,
+        bm25_search_k=5,
+        rrf_k=60,
+        source_boost=0.15,
+        k_values=[1, 2],
+        where=None,
+        reranker_model=None,
+        parent_texts={},
+        reranker_candidate_k=20,
+        reranker_batch_size=4,
+        graph_index=graph,
+        graph_search_k=5,
+        graph_depth=2,
+    )
+
+    assert [call["query"] for call in graph.calls] == ["Probation leave", "Regular leave"]
+    assert [call["source_hints"] for call in graph.calls] == [["policy"], ["policy"]]
+    assert detail["graph_results"] == 2
+    assert detail["evidence_coverage@2"] == 1.0
 
 
 def test_evidence_coverage_at_k_requires_each_group_to_be_covered():
