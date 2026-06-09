@@ -205,3 +205,55 @@ async def test_router_stream_final_response_event_includes_debug_id_for_enterpri
     response_event = next(event for event in events if event.get("type") == "response")
     assert response_event["debug_id"] == "dbg-stream"
     assert response_event["request_id"] == "req-stream"
+
+
+@pytest.mark.anyio
+async def test_router_enterprise_node_exposes_web_reference_sources():
+    from app.agent.router_graph import RouterGraph
+    from app.schemas.rag import EvaluationSummary, RagMetrics, RagResponse, RagSource, RagStrategySummary
+
+    class FakeWebFallbackRagGraph:
+        async def run(self, state):
+            return RagResponse(
+                request_id=state.request_id,
+                debug_id=state.debug_id,
+                session_id=state.session_id,
+                answer="公司知识库未找到足够资料。以下为通用参考。",
+                sources=[
+                    RagSource(
+                        source_id="web:https://example.test/expense",
+                        title="通用报销流程参考",
+                        source_type="web_reference",
+                        score=0.8,
+                        metadata={
+                            "url": "https://example.test/expense",
+                            "snippet": "提交申请、主管审批、财务复核。",
+                            "reference_scope": "general_public_reference",
+                        },
+                    )
+                ],
+                strategy=RagStrategySummary(strategy_name="default", retrieval_mode="hybrid", final_top_k=5),
+                evaluation=EvaluationSummary(enough_evidence=False, covered_aspects=[], missing_aspects=[state.original_query]),
+                metrics=RagMetrics(retry_count=0, retrieval_attempts=1, web_search_ms=12.0),
+            )
+
+    router = object.__new__(RouterGraph)
+    router.enterprise_rag_graph = FakeWebFallbackRagGraph()
+    state = {
+        "query": "如果公司知识库没有报销流程，给我一个通用流程参考",
+        "user_id": "user-1",
+        "session_id": "sess-web-source",
+        "request_id": "req-web-source",
+        "debug_id": "dbg-web-source",
+        "rag_intent": "procedure",
+        "source_hints": [],
+        "confidence": 0.88,
+        "reason": "Needs policy source.",
+        "long_term_memories": [],
+    }
+
+    result = await router.enterprise_knowledge_node(state)
+
+    assert result["documents"][0]["source_type"] == "web_reference"
+    assert result["documents"][0]["metadata"]["reference_scope"] == "general_public_reference"
+    assert result["steps"][0]["tool_output"]["sources"][0]["source_type"] == "web_reference"

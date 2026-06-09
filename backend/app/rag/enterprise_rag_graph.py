@@ -3,8 +3,10 @@ from time import perf_counter
 from typing import Any
 
 from app.rag.decomposition import decompose_query, merge_decomposed_scores, should_decompose_intent
+from app.rag.web_search import normalize_web_search_results
 from app.schemas.rag import (
     EvaluationResult,
+    ExternalSearchDecision,
     RagDocument,
     RagMetrics,
     RagPlan,
@@ -18,24 +20,32 @@ from app.schemas.rag import (
 )
 from app.schemas.rag_debug import (
     EvaluationTrace,
+    ExternalSearchDecisionTrace,
     GenerationTrace,
     PlannerTrace,
     RagDebugTrace,
     RagStrategyTrace,
     RetrievalAttemptTrace,
     RouteDecisionTrace,
+    WebSearchTrace,
 )
 from app.services.rag_debug_trace_store import debug_trace_store
 
 
 class EnterpriseRagGraph:
-    def __init__(self, service=None, trace_store=None):
+    def __init__(self, service=None, trace_store=None, web_search_service=None):
         if service is None:
             from app.rag.enterprise_rag_service import enterprise_rag_service
 
             service = enterprise_rag_service
+        if web_search_service is None:
+            from app.rag.web_search import web_search_service as default_web_search_service
+
+            web_search_service = default_web_search_service
+
         self.service = service
         self.trace_store = trace_store or debug_trace_store
+        self.web_search_service = web_search_service
 
     async def run(self, state: RagState) -> RagResponse:
         started = perf_counter()
@@ -49,7 +59,7 @@ class EnterpriseRagGraph:
 
         while state.next_action in {"rewrite_query", "expand_top_k"}:
             if state.retry_count >= state.max_retries:
-                state.next_action = "insufficient_evidence"
+                state.next_action = "external_search"
                 break
             retry_action = state.next_action
             if retry_action == "rewrite_query":
@@ -62,6 +72,18 @@ class EnterpriseRagGraph:
 
         if state.next_action == "generate":
             await self.generate_answer(state, trace)
+        elif state.next_action == "external_search":
+            self.decide_external_search_node(state, trace)
+            if state.external_search_decision.allowed:
+                await self.web_search_node(state, trace)
+            if state.web_results:
+                self.merge_evidence_node(state)
+                await self.generate_answer(state, trace)
+            elif state.selected_documents and state.evidence_mode == "hybrid":
+                state.evidence_mode = "internal_only"
+                await self.generate_answer(state, trace)
+            else:
+                self.build_insufficient_evidence(state)
         else:
             self.build_insufficient_evidence(state)
 
@@ -330,10 +352,10 @@ class EnterpriseRagGraph:
             state.next_action = "insufficient_evidence"
             return
         if state.evaluator_result and state.evaluator_result.enough_evidence:
-            state.next_action = "generate"
+            state.next_action = "external_search" if self._needs_public_context(state.original_query) else "generate"
             return
         if state.retry_count >= state.max_retries:
-            state.next_action = "insufficient_evidence"
+            state.next_action = "external_search"
             return
         suggested_action = state.evaluator_result.suggested_action if state.evaluator_result else "insufficient_evidence"
         state.next_action = suggested_action if suggested_action in {"rewrite_query", "expand_top_k"} else "insufficient_evidence"
@@ -371,6 +393,295 @@ class EnterpriseRagGraph:
             data={"retry_count": state.retry_count, "final_top_k": strategy.final_top_k},
         )
 
+    def decide_external_search(self, state: RagState) -> None:
+        if state.security_flags or state.acl_filter_removed_all_candidates:
+            state.external_search_decision = ExternalSearchDecision(
+                mode="none",
+                allowed=False,
+                reason="Security or ACL guard blocked external fallback.",
+            )
+            state.evidence_mode = "internal_only"
+            return
+
+        query = state.original_query.strip()
+        asks_generic_fallback = self._asks_for_generic_fallback(query)
+        needs_public_context = self._needs_public_context(query)
+        has_internal_evidence = bool(state.evaluator_result and state.evaluator_result.enough_evidence)
+
+        if has_internal_evidence:
+            if needs_public_context:
+                state.external_search_decision = ExternalSearchDecision(
+                    mode="hybrid",
+                    allowed=True,
+                    reason="Internal evidence is sufficient and the question also benefits from public context.",
+                    user_visible_label="公开资料参考",
+                )
+                state.evidence_mode = "hybrid"
+                return
+            state.external_search_decision = ExternalSearchDecision(
+                mode="none",
+                allowed=False,
+                reason="Internal evidence is sufficient.",
+            )
+            state.evidence_mode = "internal_only"
+            return
+
+        if self._is_company_specific_fact(query):
+            state.external_search_decision = ExternalSearchDecision(
+                mode="none",
+                allowed=False,
+                reason="The question asks for company-specific information that public web results cannot replace.",
+            )
+            state.evidence_mode = "internal_only"
+            return
+
+        if self._asks_for_company_specific_procedure(query) and not asks_generic_fallback:
+            state.external_search_decision = ExternalSearchDecision(
+                mode="none",
+                allowed=False,
+                reason="The question asks for company-specific information that public web results cannot replace.",
+            )
+            state.evidence_mode = "internal_only"
+            return
+
+        if asks_generic_fallback:
+            state.external_search_decision = ExternalSearchDecision(
+                mode="fallback",
+                allowed=True,
+                reason="Internal evidence is insufficient and the question can be answered with general public reference.",
+                user_visible_label="通用参考",
+            )
+            state.evidence_mode = "web_fallback"
+            return
+
+        if needs_public_context:
+            state.external_search_decision = ExternalSearchDecision(
+                mode="fallback",
+                allowed=True,
+                reason="Internal evidence is insufficient and the question needs public reference context.",
+                user_visible_label="公开资料参考",
+            )
+            state.evidence_mode = "web_fallback"
+            return
+
+        if state.rag_intent == "procedure":
+            state.external_search_decision = ExternalSearchDecision(
+                mode="fallback",
+                allowed=True,
+                reason="Internal evidence is insufficient and the procedure question can use general public reference.",
+                user_visible_label="通用参考",
+            )
+            state.evidence_mode = "web_fallback"
+            return
+
+        state.external_search_decision = ExternalSearchDecision(
+            mode="none",
+            allowed=False,
+            reason="External fallback is not enabled for this RAG intent.",
+        )
+        state.evidence_mode = "internal_only"
+
+    @staticmethod
+    def _has_internal_company_marker(query: str) -> bool:
+        normalized_query = query.lower()
+        internal_company_markers = [
+            "我们公司",
+            "我司",
+            "本公司",
+            "公司内部",
+            "公司知识库",
+            "正式制度",
+            "our company",
+            "my company",
+            "at our company",
+            "internal policy",
+            "internal docs",
+            "internal documentation",
+            "internal knowledge base",
+            "our internal",
+            "nexuskb",
+        ]
+        return any(marker in normalized_query for marker in internal_company_markers)
+
+    @classmethod
+    def _is_company_specific_fact(cls, query: str) -> bool:
+        normalized_query = query.lower()
+        private_fact_markers = [
+            "员工工资",
+            "薪资",
+            "salary",
+            "salary band",
+            "salary bands",
+            "绩效",
+            "报销上限",
+            "reimbursement limit",
+            "deployment endpoint",
+            "endpoint",
+            "审批人",
+            "负责人",
+        ]
+        specific_markers = [
+            "是多少",
+            "是什么",
+            "具体",
+            "上限",
+            "limit",
+            "金额",
+            "谁",
+            "哪位",
+            "工号",
+            "名单",
+            "电话",
+            "邮箱",
+            "what is",
+            "how much",
+            "salary band",
+            "salary bands",
+            "who",
+        ]
+        has_internal_company_marker = cls._has_internal_company_marker(query)
+        has_private_fact_marker = any(marker in normalized_query for marker in private_fact_markers)
+        has_specific_marker = any(marker in normalized_query for marker in specific_markers)
+        return has_internal_company_marker and has_private_fact_marker and (
+            has_specific_marker or cls._asks_for_generic_fallback(query)
+        )
+
+    @classmethod
+    def _asks_for_company_specific_procedure(cls, query: str) -> bool:
+        normalized_query = query.lower()
+        procedure_markers = [
+            "流程",
+            "程序",
+            "步骤",
+            "申请",
+            "报销",
+            "休假",
+            "pto",
+            "procedure",
+            "process",
+            "how do i",
+            "how to",
+            "request",
+        ]
+        return cls._has_internal_company_marker(query) and any(marker in normalized_query for marker in procedure_markers)
+
+    @staticmethod
+    def _asks_for_generic_fallback(query: str) -> bool:
+        normalized_query = query.lower()
+        explicit_missing_markers = [
+            "如果公司知识库没有",
+            "如果知识库没有",
+            "知识库没有",
+            "公司知识库没有",
+            "找不到",
+            "缺少",
+            "未找到",
+            "if the knowledge base does not have",
+            "if our knowledge base does not have",
+            "if no internal",
+            "if internal docs do not have",
+            "if internal documentation does not have",
+            "not found",
+            "no internal",
+        ]
+        generic_markers = [
+            "通用",
+            "一般",
+            "常见",
+            "generic",
+            "general",
+            "common",
+            "best practices",
+        ]
+        explicit_generic_reference_markers = [
+            "通用参考",
+            "通用流程参考",
+            "一般参考",
+            "常见参考",
+            "generic reference",
+            "general reference",
+            "common reference",
+        ]
+        has_explicit_missing = any(marker in normalized_query for marker in explicit_missing_markers)
+        has_generic_reference = any(marker in normalized_query for marker in explicit_generic_reference_markers) or any(
+            marker in normalized_query for marker in generic_markers
+        )
+        return has_explicit_missing and has_generic_reference
+
+    @staticmethod
+    def _needs_public_context(query: str) -> bool:
+        normalized_query = query.lower()
+        public_markers = [
+            "业界",
+            "行业",
+            "公开",
+            "最佳实践",
+            "趋势",
+            "对比",
+            "差距",
+            "通用",
+            "常见",
+            "industry",
+            "public",
+            "best practice",
+            "best practices",
+            "trend",
+            "benchmark",
+            "common",
+            "generic",
+            "general",
+        ]
+        return any(marker in normalized_query for marker in public_markers)
+
+    def decide_external_search_node(self, state: RagState, trace: RagDebugTrace) -> None:
+        self.decide_external_search(state)
+        trace.external_search_decision = ExternalSearchDecisionTrace(decision=state.external_search_decision)
+        self._record_event(
+            state,
+            "external_search_decided",
+            "decide_external_search",
+            data=state.external_search_decision.model_dump(),
+        )
+
+    async def web_search_node(self, state: RagState, trace: RagDebugTrace) -> None:
+        state.web_search_attempted = True
+        started = perf_counter()
+        query = state.original_query
+        self._record_event(
+            state,
+            "web_search_started",
+            "web_search",
+            data={"query": query, "max_results": 3, "mode": state.external_search_decision.mode},
+        )
+        raw_results = await self.web_search_service.search(query, max_results=3)
+        state.web_search_ms = (perf_counter() - started) * 1000
+        state.web_results = normalize_web_search_results(raw_results, max_results=3)
+        trace.web_search = WebSearchTrace(query=query, results=state.web_results, elapsed_ms=state.web_search_ms)
+        if not state.web_results:
+            state.external_search_decision.allowed = False
+            state.external_search_decision.reason = "External search returned no usable results."
+            trace.external_search_decision = ExternalSearchDecisionTrace(decision=state.external_search_decision)
+        self._record_event(
+            state,
+            "web_search_finished",
+            "web_search",
+            data={"results": len(state.web_results), "elapsed_ms": state.web_search_ms},
+        )
+
+    def merge_evidence_node(self, state: RagState) -> None:
+        state.sources = [self._to_rag_source(document) for document in state.selected_documents]
+        state.sources.extend(RagSource.from_web_result(result) for result in state.web_results)
+        self._record_event(
+            state,
+            "evidence_merged",
+            "merge_evidence",
+            data={
+                "internal_sources": len(state.selected_documents),
+                "web_sources": len(state.web_results),
+                "evidence_mode": state.evidence_mode,
+            },
+        )
+
     async def generate_answer(self, state: RagState, trace: RagDebugTrace) -> None:
         started = perf_counter()
         self._record_event(state, "answer_started", "generate_answer")
@@ -378,9 +689,13 @@ class EnterpriseRagGraph:
             state.current_query,
             state.selected_documents,
             memory_context=state.memory_context,
+            web_results=state.web_results,
+            evidence_mode=state.evidence_mode,
         )
         state.answer = answer
-        state.sources = [self._to_rag_source(document) for document in state.selected_documents]
+        if not state.sources:
+            state.sources = [self._to_rag_source(document) for document in state.selected_documents]
+            state.sources.extend(RagSource.from_web_result(result) for result in state.web_results)
         trace.generation = GenerationTrace(answer_preview=answer[:300], elapsed_ms=(perf_counter() - started) * 1000)
 
     def build_insufficient_evidence(self, state: RagState) -> None:
@@ -436,6 +751,7 @@ class EnterpriseRagGraph:
                 retry_count=state.retry_count,
                 retrieval_attempts=len(state.retrieval_attempts),
                 total_ms=total_ms,
+                web_search_ms=state.web_search_ms,
             ),
             warnings=state.warnings,
         )

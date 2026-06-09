@@ -155,3 +155,51 @@ def test_rag_state_requires_durable_request_and_debug_ids():
             original_query="Question?",
             current_query="Question?",
         )
+
+
+def test_rag_state_tracks_websearch_fallback_defaults():
+    from app.schemas.rag import RagState
+
+    state = RagState(
+        request_id="req-web-defaults",
+        debug_id="dbg-web-defaults",
+        user_id="user-1",
+        original_query="公司知识库没有报销流程时给我通用参考",
+        current_query="公司知识库没有报销流程时给我通用参考",
+        rag_intent="procedure",
+    )
+
+    assert state.external_search_decision.mode == "none"
+    assert state.external_search_decision.allowed is False
+    assert state.evidence_mode == "internal_only"
+    assert state.web_results == []
+    assert state.web_search_attempted is False
+    assert state.web_search_ms is None
+
+
+def test_websearch_result_serializes_as_reference_source():
+    from app.schemas.rag import RagSource, WebSearchResult
+
+    result = WebSearchResult(
+        title="通用企业报销流程",
+        url="https://example.test/reimbursement",
+        snippet="员工提交票据，部门审批，财务复核后付款。",
+        score=0.74,
+    )
+    source = RagSource.from_web_result(result)
+
+    assert source.source_id == "web:https://example.test/reimbursement"
+    assert source.source_type == "web_reference"
+    assert source.title == "通用企业报销流程"
+    assert source.metadata["url"] == "https://example.test/reimbursement"
+    assert source.metadata["reference_scope"] == "general_public_reference"
+
+
+def test_websearch_result_uses_reference_fallbacks_when_title_and_url_are_empty():
+    from app.schemas.rag import RagSource, WebSearchResult
+
+    result = WebSearchResult(title="", url="", snippet="x")
+    source = RagSource.from_web_result(result)
+
+    assert source.source_id == "web:result"
+    assert source.title == "Web reference"

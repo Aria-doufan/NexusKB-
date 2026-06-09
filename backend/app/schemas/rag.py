@@ -88,6 +88,22 @@ class RagDocument(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebSearchResult(BaseModel):
+    title: str = ""
+    url: str = ""
+    snippet: str = ""
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    provider: str = "web"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalSearchDecision(BaseModel):
+    mode: Literal["none", "fallback", "hybrid"] = "none"
+    allowed: bool = False
+    reason: str = ""
+    user_visible_label: str = ""
+
+
 class RetrievalAttempt(BaseModel):
     attempt_id: int = Field(ge=1)
     query: str = Field(min_length=1)
@@ -148,6 +164,25 @@ class RagSource(BaseModel):
     score: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @classmethod
+    def from_web_result(cls, result: WebSearchResult) -> "RagSource":
+        source_reference = result.url or result.title or "result"
+        title = result.title or result.url or "Web reference"
+
+        return cls(
+            source_id=f"web:{source_reference}",
+            title=title,
+            source_type="web_reference",
+            score=result.score,
+            metadata={
+                **result.metadata,
+                "url": result.url,
+                "snippet": result.snippet,
+                "provider": result.provider,
+                "reference_scope": "general_public_reference",
+            },
+        )
+
 
 class RagStrategySummary(BaseModel):
     strategy_name: str
@@ -168,6 +203,7 @@ class RagMetrics(BaseModel):
     retry_count: int = Field(default=0, ge=0)
     retrieval_attempts: int = Field(default=0, ge=0)
     total_ms: float | None = Field(default=None, ge=0.0)
+    web_search_ms: float | None = Field(default=None, ge=0.0)
 
 
 class RagResponse(BaseModel):
@@ -201,6 +237,11 @@ class RagState(BaseModel):
     strategy: RagStrategyConfig | None = None
     retrieval_attempts: list[RetrievalAttempt] = Field(default_factory=list)
     selected_documents: list[RagDocument] = Field(default_factory=list)
+    external_search_decision: ExternalSearchDecision = Field(default_factory=ExternalSearchDecision)
+    web_results: list[WebSearchResult] = Field(default_factory=list)
+    web_search_attempted: bool = False
+    web_search_ms: float | None = Field(default=None, ge=0.0)
+    evidence_mode: Literal["internal_only", "web_fallback", "hybrid"] = "internal_only"
     evaluator_result: EvaluationResult | None = None
     retry_count: int = Field(default=0, ge=0)
     max_retries: int = Field(default=1, ge=0)
