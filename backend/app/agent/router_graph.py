@@ -555,6 +555,7 @@ class RouterGraph:
                     "tool_output": {
                         "debug_id": response.debug_id,
                         "retrieved_documents": len(response.sources),
+                        "sources": documents,
                         "strategy": response.strategy.model_dump(),
                         "evaluation": response.evaluation.model_dump() if response.evaluation else None,
                         "metrics": response.metrics.model_dump(),

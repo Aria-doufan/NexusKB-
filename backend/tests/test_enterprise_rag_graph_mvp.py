@@ -30,7 +30,7 @@ class FakeEnterpriseRagService:
             "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0 if kwargs.get("use_reranker") else 0.0},
         }
 
-    async def generate_answer(self, query, documents, memory_context=None):
+    async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
         self.generated_queries.append(query)
         self.generated_memory_contexts.append(memory_context)
         return f"answer for {query} using {len(documents)} docs"
@@ -68,7 +68,7 @@ class QueryAwareEnterpriseRagService:
             "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0 if kwargs.get("use_reranker") else 0.0},
         }
 
-    async def generate_answer(self, query, documents, memory_context=None):
+    async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
         self.generated_queries.append(query)
         self.generated_memory_contexts.append(memory_context)
         return f"answer for {query} using {len(documents)} docs"
@@ -414,6 +414,18 @@ def test_enterprise_rag_service_formats_dict_documents_for_answer_context():
     assert "Employees can find PTO rules" in context
 
 
+def test_enterprise_rag_service_formats_dict_web_results_for_answer_context():
+    from app.rag.enterprise_rag_service import EnterpriseRagService
+
+    context = EnterpriseRagService._format_web_context(
+        [{"title": "T", "url": "U", "snippet": "S"}]
+    )
+
+    assert "T" in context
+    assert "U" in context
+    assert "S" in context
+
+
 @pytest.mark.anyio
 async def test_enterprise_rag_graph_warns_but_still_responds_when_trace_store_fails():
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph
@@ -433,3 +445,194 @@ async def test_enterprise_rag_graph_warns_but_still_responds_when_trace_store_fa
 
     assert response.debug_id == "dbg-3"
     assert any("trace" in warning.lower() for warning in response.warnings)
+
+
+@pytest.mark.anyio
+async def test_web_fallback_generation_receives_web_context():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState, WebSearchResult
+
+    class CapturingService(QueryAwareEnterpriseRagService):
+        def __init__(self):
+            super().__init__({"报销流程": []})
+            self.generated_web_results = None
+            self.generated_evidence_mode = None
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            self.generated_web_results = web_results
+            self.generated_evidence_mode = evidence_mode
+            return "公司知识库没有足够信息。通用参考：提交申请、主管审批、财务复核。"
+
+    class FakeWebSearchService:
+        async def search(self, query, max_results=3):
+            return [WebSearchResult(title="报销流程参考", url="https://example.test/expense", snippet="提交申请、主管审批、财务复核。", score=0.8)]
+
+    service = CapturingService()
+    graph = EnterpriseRagGraph(service=service, trace_store=CapturingTraceStore(), web_search_service=FakeWebSearchService())
+    state = RagState(
+        request_id="req-web-generation",
+        debug_id="dbg-web-generation",
+        user_id="user-1",
+        original_query="报销流程",
+        current_query="报销流程",
+        rag_intent="procedure",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert service.generated_web_results[0].title == "报销流程参考"
+    assert service.generated_evidence_mode == "web_fallback"
+    assert "通用参考" in response.answer
+    assert response.sources[0].source_type == "web_reference"
+
+
+@pytest.mark.anyio
+async def test_public_context_query_with_internal_evidence_runs_hybrid_web_search():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState, WebSearchResult
+
+    document = {
+        "parent_doc_id": "parent-1",
+        "parent_chunk_id": "chunk-1",
+        "source_type": "policy",
+        "title": "报销制度",
+        "section_heading": "报销",
+        "score": 0.9,
+        "parent_text": "公司知识库说明：员工按报销制度提交票据并等待审批。",
+    }
+
+    class CapturingService(QueryAwareEnterpriseRagService):
+        def __init__(self):
+            super().__init__({"对比我们报销政策和行业最佳实践": [document]})
+            self.generated_web_results = None
+            self.generated_evidence_mode = None
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            self.generated_web_results = web_results
+            self.generated_evidence_mode = evidence_mode
+            return "公司政策要求提交票据；公开资料建议审批链路清晰。"
+
+    class FakeWebSearchService:
+        def __init__(self):
+            self.calls = []
+
+        async def search(self, query, max_results=3):
+            self.calls.append({"query": query, "max_results": max_results})
+            return [
+                WebSearchResult(
+                    title="行业报销最佳实践",
+                    url="https://example.test/best-practice",
+                    snippet="公开资料建议保留票据、主管审批、财务复核。",
+                    score=0.8,
+                )
+            ]
+
+    service = CapturingService()
+    web_service = FakeWebSearchService()
+    graph = EnterpriseRagGraph(service=service, trace_store=CapturingTraceStore(), web_search_service=web_service)
+    state = RagState(
+        request_id="req-hybrid-public-context",
+        debug_id="dbg-hybrid-public-context",
+        user_id="user-1",
+        original_query="对比我们报销政策和行业最佳实践",
+        current_query="对比我们报销政策和行业最佳实践",
+        rag_intent="comparison",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert web_service.calls == [{"query": "对比我们报销政策和行业最佳实践", "max_results": 3}]
+    assert service.generated_evidence_mode == "hybrid"
+    assert service.generated_web_results[0].title == "行业报销最佳实践"
+    assert {source.source_type for source in response.sources} == {"policy", "web_reference"}
+
+
+@pytest.mark.anyio
+async def test_injected_web_search_dict_results_are_normalized_before_source_conversion():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState
+
+    class CapturingService(QueryAwareEnterpriseRagService):
+        def __init__(self):
+            super().__init__({"如果公司知识库没有报销流程，给我一个通用流程参考": []})
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            return "公司知识库没有足够信息。以下为通用参考。"
+
+    class DictWebSearchService:
+        async def search(self, query, max_results=3):
+            return [
+                {
+                    "title": "通用报销流程参考",
+                    "url": "https://example.test/expense-dict",
+                    "snippet": "提交申请、主管审批、财务复核。",
+                    "score": 0.8,
+                }
+            ]
+
+    graph = EnterpriseRagGraph(
+        service=CapturingService(),
+        trace_store=CapturingTraceStore(),
+        web_search_service=DictWebSearchService(),
+    )
+    state = RagState(
+        request_id="req-dict-web-results",
+        debug_id="dbg-dict-web-results",
+        user_id="user-1",
+        original_query="如果公司知识库没有报销流程，给我一个通用流程参考",
+        current_query="如果公司知识库没有报销流程，给我一个通用流程参考",
+        rag_intent="procedure",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert response.sources[0].source_id == "web:https://example.test/expense-dict"
+    assert response.sources[0].source_type == "web_reference"
+    assert state.web_results[0].url == "https://example.test/expense-dict"
+
+
+@pytest.mark.anyio
+async def test_internal_evidence_generation_does_not_receive_web_context():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.schemas.rag import RagState
+
+    document = {
+        "parent_doc_id": "parent-1",
+        "parent_chunk_id": "chunk-1",
+        "source_type": "policy",
+        "title": "报销制度",
+        "section_heading": "报销",
+        "score": 0.9,
+        "parent_text": "根据公司知识库，按照报销制度执行。",
+    }
+
+    class CapturingService(QueryAwareEnterpriseRagService):
+        def __init__(self):
+            super().__init__({"报销流程": [document]})
+            self.generated_web_results = "not-called"
+            self.generated_evidence_mode = "not-called"
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            self.generated_web_results = web_results
+            self.generated_evidence_mode = evidence_mode
+            return "根据公司知识库，按照报销制度执行。"
+
+    service = CapturingService()
+    graph = EnterpriseRagGraph(service=service, trace_store=CapturingTraceStore())
+    state = RagState(
+        request_id="req-internal-generation",
+        debug_id="dbg-internal-generation",
+        user_id="user-1",
+        original_query="报销流程",
+        current_query="报销流程",
+        rag_intent="procedure",
+    )
+
+    response = await graph.run(state)
+
+    assert service.generated_web_results == []
+    assert service.generated_evidence_mode == "internal_only"
+    assert response.sources[0].title == "报销制度"

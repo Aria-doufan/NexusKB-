@@ -1,6 +1,14 @@
 from pydantic import BaseModel, Field
 
-from app.schemas.rag import EvaluationResult, RagPlan, RagSource, RagStrategyConfig, RetrievalAttempt
+from app.schemas.rag import (
+    EvaluationResult,
+    ExternalSearchDecision,
+    RagPlan,
+    RagSource,
+    RagStrategyConfig,
+    RetrievalAttempt,
+    WebSearchResult,
+)
 
 
 class RouteDecisionTrace(BaseModel):
@@ -41,6 +49,16 @@ class GenerationTrace(BaseModel):
     elapsed_ms: float = 0.0
 
 
+class ExternalSearchDecisionTrace(BaseModel):
+    decision: ExternalSearchDecision
+
+
+class WebSearchTrace(BaseModel):
+    query: str = ""
+    results: list[WebSearchResult] = Field(default_factory=list)
+    elapsed_ms: float = 0.0
+
+
 class RagDebugTrace(BaseModel):
     request_id: str = Field(min_length=1)
     debug_id: str = Field(min_length=1)
@@ -53,6 +71,8 @@ class RagDebugTrace(BaseModel):
     retrieval_attempts: list[RetrievalAttemptTrace] = Field(default_factory=list)
     evaluations: list[EvaluationTrace] = Field(default_factory=list)
     generation: GenerationTrace | None = None
+    external_search_decision: ExternalSearchDecisionTrace | None = None
+    web_search: WebSearchTrace | None = None
     final_answer_preview: str | None = None
     final_sources: list[RagSource] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
