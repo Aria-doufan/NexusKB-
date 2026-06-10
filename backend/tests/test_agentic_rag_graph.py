@@ -176,3 +176,34 @@ async def test_agentic_rag_graph_refuses_inside_single_graph():
     assert response.sources == []
     assert state.action == "refuse"
     assert state.response_type == "refusal"
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_fallback_decision_preserves_existing_routing_fields():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import RagState
+
+    graph = AgenticRagGraph(decision_chain=None)
+    state = RagState(
+        request_id="req-preclassified",
+        debug_id="dbg-preclassified",
+        user_id="user-1",
+        original_query="Find the Confluence rollout plan",
+        current_query="Find the Confluence rollout plan",
+        rag_intent="constrained",
+        source_hints=["confluence"],
+        router_confidence=0.8,
+        router_reason="preclassified",
+        action="retrieve",
+        needs_retrieval=True,
+    )
+
+    await graph.understand_request_node(state)
+
+    assert state.rag_intent == "constrained"
+    assert state.intent == "constrained"
+    assert state.action == "retrieve"
+    assert state.needs_retrieval is True
+    assert state.source_hints == ["confluence"]
+    assert state.router_confidence == 0.8
+    assert state.router_reason == "preclassified"

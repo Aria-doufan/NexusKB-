@@ -1,4 +1,5 @@
 import json
+from contextvars import ContextVar
 from time import perf_counter
 from typing import Any
 
@@ -9,12 +10,14 @@ from app.schemas.rag import AgenticActionDecision, RagState
 from app.schemas.rag_debug import RagDebugTrace
 
 
+_active_trace_var: ContextVar[RagDebugTrace | None] = ContextVar("agentic_rag_active_trace", default=None)
+
+
 class AgenticRagGraph(EnterpriseRagGraph):
     def __init__(self, service=None, trace_store=None, decision_chain=None):
         super().__init__(service=service, trace_store=trace_store)
         self.decision_chain = decision_chain
         self.graph = self._build_graph()
-        self._active_trace: RagDebugTrace | None = None
 
     def _build_graph(self):
         graph = StateGraph(RagState)
@@ -69,7 +72,8 @@ class AgenticRagGraph(EnterpriseRagGraph):
     async def run(self, state: RagState):
         started = perf_counter()
         started_at = self._now()
-        self._active_trace = self.initialize_trace(state, started_at)
+        trace = self.initialize_trace(state, started_at)
+        trace_token = _active_trace_var.set(trace)
         try:
             result = await self.graph.ainvoke(state)
             if isinstance(result, dict):
@@ -79,11 +83,11 @@ class AgenticRagGraph(EnterpriseRagGraph):
             elif isinstance(result, RagState) and result is not state:
                 for field_name in RagState.model_fields:
                     setattr(state, field_name, getattr(result, field_name))
-            response = await self.finalize_trace(state, self._active_trace, started, started_at)
+            response = await self.finalize_trace(state, trace, started, started_at)
             object.__setattr__(response.strategy, "query_type", state.rag_intent)
             return response
         finally:
-            self._active_trace = None
+            _active_trace_var.reset(trace_token)
 
     def initialize_node(self, state: RagState) -> RagState:
         self._record_event(state, "agentic_graph_initialized", "initialize")
@@ -91,7 +95,18 @@ class AgenticRagGraph(EnterpriseRagGraph):
 
     async def understand_request_node(self, state: RagState) -> RagState:
         if self.decision_chain is None:
-            decision = AgenticActionDecision()
+            decision = AgenticActionDecision(
+                intent=state.rag_intent,
+                action=state.action,
+                needs_retrieval=state.needs_retrieval,
+                needs_tool=state.needs_tool,
+                needs_clarification=state.needs_clarification,
+                safety_risk=state.safety_risk,
+                source_hints=list(state.source_hints),
+                required_tools=list(state.required_tools),
+                confidence=state.router_confidence,
+                reason=state.router_reason,
+            )
         else:
             payload = {
                 "query": state.current_query,
@@ -113,6 +128,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
         state.required_tools = list(decision.required_tools)
         state.router_confidence = decision.confidence
         state.router_reason = decision.reason
+        self._update_trace_route_decision(state)
         self._record_event(
             state,
             "agentic_action_decided",
@@ -225,7 +241,18 @@ class AgenticRagGraph(EnterpriseRagGraph):
         turns = state.history[-6:]
         return "\n".join(f"{role}: {content}" for role, content in turns)
 
+    def _update_trace_route_decision(self, state: RagState) -> None:
+        trace = _active_trace_var.get()
+        if trace is None:
+            return
+        trace.route_decision.route = state.route
+        trace.route_decision.rag_intent = state.rag_intent
+        trace.route_decision.source_hints = list(state.source_hints)
+        trace.route_decision.confidence = state.router_confidence
+        trace.route_decision.reason = state.router_reason
+
     def _require_trace(self) -> RagDebugTrace:
-        if self._active_trace is None:
+        trace = _active_trace_var.get()
+        if trace is None:
             raise RuntimeError("AgenticRagGraph trace is not initialized.")
-        return self._active_trace
+        return trace
