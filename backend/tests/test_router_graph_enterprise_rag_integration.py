@@ -238,3 +238,40 @@ async def test_router_graph_delegates_all_requests_to_agentic_rag_graph(monkeypa
     assert result["route"] == "agentic_rag"
     assert result["response"] == "hello"
     assert result["steps"] == [{"tool": "agentic_rag_graph"}]
+
+
+@pytest.mark.anyio
+async def test_router_graph_stream_includes_agentic_rag_events(monkeypatch):
+    from app.agent import router_graph as router_module
+    from app.agent.router_graph import RouterGraph
+
+    class FakeAgenticRagGraph:
+        async def invoke(self, query, user_id, session_id=None):
+            return {
+                "session_id": session_id or "generated-session",
+                "request_id": "req-1",
+                "debug_id": "dbg-1",
+                "rag_intent": "constrained",
+                "source_hints": ["confluence"],
+                "confidence": 0.9,
+                "reason": "Needs KB.",
+                "response": "answer",
+                "steps": [],
+                "error": None,
+                "sse_events": [
+                    {"type": "rag_event", "event": "retrieval_started", "request_id": "req-1"},
+                    {"type": "rag_event", "event": "retrieval_finished", "request_id": "req-1"},
+                ],
+            }
+
+    monkeypatch.setattr(router_module, "AgenticRagGraph", lambda: FakeAgenticRagGraph())
+
+    graph = RouterGraph()
+    events = [event async for event in graph.stream("Where is PTO?", "user-1", "sess-1")]
+    payloads = [json.loads(event.removeprefix("data: ").strip()) for event in events]
+
+    assert [payload.get("event") for payload in payloads if payload.get("type") == "rag_event"] == [
+        "retrieval_started",
+        "retrieval_finished",
+    ]
+    assert payloads[-1]["type"] == "done"

@@ -674,6 +674,8 @@ class RouterGraph:
                 "reason": result.get("reason", ""),
             }
         )
+        for event in result.get("sse_events", []):
+            yield self._sse_event(event)
         yield self._sse_event(
             {
                 "type": "response",

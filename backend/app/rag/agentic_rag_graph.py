@@ -158,6 +158,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
             "sources": [source.model_dump() for source in response.sources],
             "steps": self._response_steps(state, response),
             "error": state.error,
+            "sse_events": list(state.sse_events),
         }
 
     async def load_context(self, state: RagState) -> None:
