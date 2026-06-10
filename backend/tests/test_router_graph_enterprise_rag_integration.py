@@ -275,3 +275,23 @@ async def test_router_graph_stream_includes_agentic_rag_events(monkeypatch):
         "retrieval_finished",
     ]
     assert payloads[-1]["type"] == "done"
+
+
+def test_router_response_accepts_agentic_rag_route():
+    from app.schemas.models import RouterResponse
+
+    response = RouterResponse(
+        session_id="sess-1",
+        route="agentic_rag",
+        request_id="req-1",
+        debug_id="dbg-1",
+        rag_intent="general_chat",
+        source_hints=[],
+        confidence=0.9,
+        reason="Handled by single Agentic RAG graph.",
+        response="hello",
+        steps=[],
+        error=None,
+    )
+
+    assert response.route == "agentic_rag"
