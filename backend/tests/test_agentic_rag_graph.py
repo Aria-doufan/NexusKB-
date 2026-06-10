@@ -2,8 +2,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 
