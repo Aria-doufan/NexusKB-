@@ -5,18 +5,64 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.agent_tools import AGENTIC_RAG_TOOLS
 from app.rag.enterprise_rag_graph import EnterpriseRagGraph
-from app.schemas.rag import AgenticActionDecision, RagState
+from app.schemas.rag import AgenticActionDecision, RagState, ToolExecutionResult
 from app.schemas.rag_debug import RagDebugTrace
 
 
 _active_trace_var: ContextVar[RagDebugTrace | None] = ContextVar("agentic_rag_active_trace", default=None)
 
 
+class AgenticToolRunner:
+    def __init__(self, tools=None):
+        self.tools = {tool.name: tool for tool in (tools or AGENTIC_RAG_TOOLS)}
+
+    async def run(self, query: str, required_tools: list[str]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for tool_name in required_tools:
+            tool = self.tools.get(tool_name)
+            if tool is None:
+                results.append(
+                    {
+                        "tool_name": tool_name,
+                        "tool_input": {},
+                        "output": "",
+                        "success": False,
+                        "error": f"Tool not registered: {tool_name}",
+                    }
+                )
+                continue
+            try:
+                output = await tool.ainvoke({})
+            except Exception as exc:
+                results.append(
+                    {
+                        "tool_name": tool_name,
+                        "tool_input": {},
+                        "output": "",
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "tool_name": tool_name,
+                    "tool_input": {},
+                    "output": str(output),
+                    "success": True,
+                    "error": None,
+                }
+            )
+        return results
+
+
 class AgenticRagGraph(EnterpriseRagGraph):
-    def __init__(self, service=None, trace_store=None, decision_chain=None):
+    def __init__(self, service=None, trace_store=None, decision_chain=None, tool_runner=None):
         super().__init__(service=service, trace_store=trace_store)
         self.decision_chain = decision_chain
+        self.tool_runner = tool_runner or AgenticToolRunner()
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -27,6 +73,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
         graph.add_node("direct_answer", self.direct_answer_node)
         graph.add_node("clarify", self.clarify_node)
         graph.add_node("refuse", self.refuse_node)
+        graph.add_node("tool_call", self.tool_call_node)
         graph.add_node("retrieve", self.retrieve_node)
         graph.add_node("evaluate_context", self.evaluate_context_node)
         graph.add_node("decide_next_action", self.decide_next_action_node)
@@ -45,12 +92,14 @@ class AgenticRagGraph(EnterpriseRagGraph):
                 "direct_answer": "direct_answer",
                 "clarify": "clarify",
                 "refuse": "refuse",
+                "tool_call": "tool_call",
                 "retrieve": "retrieve",
             },
         )
         graph.add_edge("direct_answer", "finalize_trace")
         graph.add_edge("clarify", "finalize_trace")
         graph.add_edge("refuse", "finalize_trace")
+        graph.add_edge("tool_call", "finalize_trace")
         graph.add_edge("retrieve", "evaluate_context")
         graph.add_edge("evaluate_context", "decide_next_action")
         graph.add_conditional_edges(
@@ -147,8 +196,6 @@ class AgenticRagGraph(EnterpriseRagGraph):
         elif state.action not in {"direct_answer", "tool_call", "refuse", "clarify", "retrieve"}:
             state.action = "retrieve"
 
-        if state.action == "tool_call":
-            state.action = "retrieve"
         self._record_event(state, "agentic_action_routed", "safety_check", data={"action": state.action})
         return state
 
@@ -171,6 +218,21 @@ class AgenticRagGraph(EnterpriseRagGraph):
         state.answer = "不能执行该请求，因为它可能带来安全或破坏性风险。"
         state.sources = []
         self._record_event(state, "refusal_created", "refuse")
+        return state
+
+    async def tool_call_node(self, state: RagState) -> RagState:
+        raw_results = await self.tool_runner.run(state.original_query, state.required_tools)
+        state.tool_results = [ToolExecutionResult.model_validate(result) for result in raw_results]
+        successful_outputs = [result.output for result in state.tool_results if result.success and result.output]
+        state.response_type = "tool_answer"
+        state.answer = "\n".join(successful_outputs) if successful_outputs else "工具调用没有返回可用结果。"
+        state.sources = []
+        self._record_event(
+            state,
+            "tool_call_finished",
+            "tool_call",
+            data={"tools": [result.tool_name for result in state.tool_results]},
+        )
         return state
 
     async def retrieve_node(self, state: RagState) -> RagState:
@@ -216,7 +278,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
         return state
 
     def route_after_safety_check(self, state: RagState) -> str:
-        return state.action if state.action in {"direct_answer", "clarify", "refuse"} else "retrieve"
+        return state.action if state.action in {"direct_answer", "clarify", "refuse", "tool_call"} else "retrieve"
 
     def route_after_decide_next_action(self, state: RagState) -> str:
         if state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count < state.max_retries:

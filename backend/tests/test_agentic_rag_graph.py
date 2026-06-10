@@ -372,3 +372,73 @@ async def test_agentic_rag_graph_records_retry_reason_on_followup_retrieval_atte
         "Initial hybrid retrieval.",
         "Retry after rewrite_query.",
     ]
+
+
+def test_agentic_rag_tools_do_not_include_legacy_rag_tool():
+    from app.agent.agent_tools import AGENTIC_RAG_TOOLS
+
+    tool_names = {tool.name for tool in AGENTIC_RAG_TOOLS}
+
+    assert "rag_summary_tools" not in tool_names
+    assert "what_time_is_now" in tool_names
+    assert "get_weather_tools" in tool_names
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_tool_call_uses_tool_node_not_retrieval():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import AgenticActionDecision, RagState
+
+    class NoRetrieveService:
+        async def retrieve(self, **kwargs):
+            raise AssertionError("tool_call must not retrieve")
+
+        async def generate_answer(self, *args, **kwargs):
+            raise AssertionError("tool_call must not call RAG generation")
+
+    class StubToolRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, query, required_tools):
+            self.calls.append({"query": query, "required_tools": required_tools})
+            return [
+                {
+                    "tool_name": "what_time_is_now",
+                    "tool_input": {},
+                    "output": "当前时间是：2026-06-10 10:30",
+                    "success": True,
+                }
+            ]
+
+    tool_runner = StubToolRunner()
+    graph = AgenticRagGraph(
+        service=NoRetrieveService(),
+        trace_store=StubTraceStore(),
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="tool_use",
+                action="tool_call",
+                needs_retrieval=False,
+                needs_tool=True,
+                required_tools=["what_time_is_now"],
+                confidence=0.96,
+                reason="Current time needs safe utility tool.",
+            )
+        ),
+        tool_runner=tool_runner,
+    )
+    state = RagState(
+        request_id="req-tool",
+        debug_id="dbg-tool",
+        user_id="user-1",
+        original_query="现在几点？",
+        current_query="现在几点？",
+    )
+
+    response = await graph.run(state)
+
+    assert response.answer == "当前时间是：2026-06-10 10:30"
+    assert state.response_type == "tool_answer"
+    assert state.tool_results[0].tool_name == "what_time_is_now"
+    assert tool_runner.calls == [{"query": "现在几点？", "required_tools": ["what_time_is_now"]}]
