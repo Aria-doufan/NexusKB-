@@ -2,7 +2,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from types import MethodType
 
 import pytest
 
@@ -94,24 +93,30 @@ async def test_router_enterprise_node_delegates_to_enterprise_rag_graph_with_rag
 
 
 @pytest.mark.anyio
-async def test_router_invoke_exposes_debug_id_for_enterprise_response():
+async def test_router_invoke_exposes_debug_id_for_agentic_rag_response():
     from app.agent.router_graph import RouterGraph
 
-    class FakeCompiledGraph:
-        async def ainvoke(self, state):
+    class FakeAgenticRagGraph:
+        async def invoke(self, query, user_id, session_id=None):
             return {
-                **state,
-                "route": "enterprise_knowledge",
-                "answer": "graph answer",
-                "debug_id": "dbg-public",
+                "session_id": session_id,
                 "request_id": "req-public",
+                "debug_id": "dbg-public",
+                "rag_intent": "constrained",
+                "source_hints": ["confluence"],
+                "confidence": 0.88,
+                "reason": "Needs policy source.",
+                "response": "graph answer",
+                "steps": [],
+                "error": None,
             }
 
     router = object.__new__(RouterGraph)
-    router.graph = FakeCompiledGraph()
+    router.agentic_rag_graph = FakeAgenticRagGraph()
 
     result = await router.invoke("Where is PTO?", "user-1", "sess-1")
 
+    assert result["route"] == "agentic_rag"
     assert result["debug_id"] == "dbg-public"
     assert result["request_id"] == "req-public"
 
@@ -132,25 +137,26 @@ def test_router_response_schema_includes_debug_id():
 
 
 @pytest.mark.anyio
-async def test_router_stream_delegated_chat_events_include_debug_id(monkeypatch):
-    import app.agent.router_graph as router_graph_module
+async def test_router_stream_agentic_rag_events_include_debug_id():
     from app.agent.router_graph import RouterGraph
 
+    class FakeAgenticRagGraph:
+        async def invoke(self, query, user_id, session_id=None):
+            return {
+                "session_id": session_id,
+                "request_id": "req-chat",
+                "debug_id": "dbg-chat",
+                "rag_intent": "unknown",
+                "source_hints": [],
+                "confidence": 0.9,
+                "reason": "General chat.",
+                "response": "chat answer",
+                "steps": [],
+                "error": None,
+            }
+
     router = object.__new__(RouterGraph)
-
-    async def fake_load_context(self, state):
-        return {"session_id": state["session_id"], "history": []}
-
-    async def fake_llm_router(self, state):
-        return {"route": "chat", "rag_intent": "unknown", "source_hints": [], "confidence": 0.9, "reason": "chat"}
-
-    async def fake_chat_stream_response(query, session_id, user_id, history, long_term_memories=None):
-        yield 'data: {"type": "response", "content": "chat answer", "session_id": "sess-1"}\n\n'
-        yield 'data: {"type": "done", "session_id": "sess-1"}\n\n'
-
-    router.load_context = MethodType(fake_load_context, router)
-    router.llm_router = MethodType(fake_llm_router, router)
-    monkeypatch.setattr(router_graph_module, "get_chat_stream_response", fake_chat_stream_response)
+    router.agentic_rag_graph = FakeAgenticRagGraph()
 
     events = []
     async for raw_event in router.stream("hello", "user-1", "sess-1"):
@@ -158,50 +164,77 @@ async def test_router_stream_delegated_chat_events_include_debug_id(monkeypatch)
 
     response_event = next(event for event in events if event.get("type") == "response")
     done_event = next(event for event in events if event.get("type") == "done")
-    assert response_event["debug_id"]
-    assert response_event["request_id"]
+    assert response_event["debug_id"] == "dbg-chat"
+    assert response_event["request_id"] == "req-chat"
     assert done_event["debug_id"] == response_event["debug_id"]
     assert done_event["request_id"] == response_event["request_id"]
 
 
 @pytest.mark.anyio
-async def test_router_stream_final_response_event_includes_debug_id_for_enterprise_route():
+async def test_router_stream_final_response_event_includes_debug_id_for_agentic_rag_route():
     from app.agent.router_graph import RouterGraph
 
+    class FakeAgenticRagGraph:
+        async def invoke(self, query, user_id, session_id=None):
+            return {
+                "session_id": session_id,
+                "request_id": "req-stream",
+                "debug_id": "dbg-stream",
+                "rag_intent": "semantic_query",
+                "source_hints": ["confluence"],
+                "confidence": 0.9,
+                "reason": "Needs enterprise docs.",
+                "response": "graph answer",
+                "steps": [],
+                "error": None,
+            }
+
     router = object.__new__(RouterGraph)
-
-    async def fake_load_context(self, state):
-        return {"session_id": state["session_id"], "history": []}
-
-    async def fake_llm_router(self, state):
-        return {
-            "route": "enterprise_knowledge",
-            "rag_intent": "semantic",
-            "source_hints": ["confluence"],
-            "confidence": 0.9,
-            "reason": "Needs enterprise docs.",
-        }
-
-    async def fake_enterprise_knowledge_node(self, state):
-        return {
-            "answer": "graph answer",
-            "debug_id": "dbg-stream",
-            "request_id": "req-stream",
-            "sse_events": [],
-        }
-
-    async def fake_persist_message(self, state):
-        return {}
-
-    router.load_context = MethodType(fake_load_context, router)
-    router.llm_router = MethodType(fake_llm_router, router)
-    router.enterprise_knowledge_node = MethodType(fake_enterprise_knowledge_node, router)
-    router.persist_message = MethodType(fake_persist_message, router)
+    router.agentic_rag_graph = FakeAgenticRagGraph()
 
     events = []
     async for raw_event in router.stream("Where is PTO?", "user-1", "sess-1"):
         events.append(json.loads(raw_event.removeprefix("data: ").strip()))
 
+    route_event = next(event for event in events if event.get("type") == "route")
     response_event = next(event for event in events if event.get("type") == "response")
+    assert route_event["route"] == "agentic_rag"
+    assert route_event["rag_intent"] == "semantic_query"
     assert response_event["debug_id"] == "dbg-stream"
     assert response_event["request_id"] == "req-stream"
+
+
+@pytest.mark.anyio
+async def test_router_graph_delegates_all_requests_to_agentic_rag_graph(monkeypatch):
+    from app.agent import router_graph as router_module
+    from app.agent.router_graph import RouterGraph
+
+    calls = []
+
+    class FakeAgenticRagGraph:
+        async def invoke(self, query, user_id, session_id=None):
+            calls.append({"query": query, "user_id": user_id, "session_id": session_id})
+            return {
+                "session_id": session_id or "generated-session",
+                "request_id": "req-1",
+                "debug_id": "dbg-1",
+                "intent": "general_chat",
+                "action": "direct_answer",
+                "rag_intent": "unknown",
+                "source_hints": [],
+                "confidence": 0.9,
+                "reason": "General answer.",
+                "response": "hello",
+                "steps": [{"tool": "agentic_rag_graph"}],
+                "error": None,
+            }
+
+    monkeypatch.setattr(router_module, "AgenticRagGraph", lambda: FakeAgenticRagGraph())
+
+    graph = RouterGraph()
+    result = await graph.invoke("hello", user_id="user-1", session_id="sess-1")
+
+    assert calls == [{"query": "hello", "user_id": "user-1", "session_id": "sess-1"}]
+    assert result["route"] == "agentic_rag"
+    assert result["response"] == "hello"
+    assert result["steps"] == [{"tool": "agentic_rag_graph"}]

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.agent.agent import get_agent_response, get_agent_stream_response, get_chat_response, get_chat_stream_response
 from app.core.logger_handler import logger
 from app.core.perf import log_perf, perf_counter
+from app.rag.agentic_rag_graph import AgenticRagGraph
 from app.rag.enterprise_rag_graph import EnterpriseRagGraph
 from app.schemas.rag import MemoryItem, RagMemoryContext, RagState
 from app.services import session_manager as sm
@@ -165,28 +166,10 @@ ROUTER_HUMAN_PROMPT = """用户问题：
 
 
 class RouterGraph:
-    """LangGraph-based router that delegates to existing RAG and Agent chains."""
+    """Compatibility wrapper around the single AgenticRagGraph."""
 
     def __init__(self):
-        self.router_model = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            streaming=False,
-            temperature=0,
-        )
-        self.router_chain = (
-            ChatPromptTemplate.from_messages(
-                [
-                    ("system", ROUTER_SYSTEM_PROMPT),
-                    ("human", ROUTER_HUMAN_PROMPT),
-                ]
-            )
-            | self.router_model
-            | StrOutputParser()
-        )
-        self.enterprise_rag_graph = EnterpriseRagGraph()
-        self.graph = self._build_graph()
+        self.agentic_rag_graph = AgenticRagGraph()
 
     def _build_graph(self):
         graph = StateGraph(GraphState)
@@ -659,6 +642,55 @@ class RouterGraph:
         except Exception as exc:
             logger.error(f"【RouterGraph】Agent节点执行失败: {exc}", exc_info=True)
             return {"answer": fallback_answer, "error": f"agent_error: {exc}"}
+
+    async def invoke(self, query: str, user_id: str, session_id: str | None = None) -> dict[str, Any]:
+        result = await self.agentic_rag_graph.invoke(query=query, user_id=user_id, session_id=session_id)
+        return {
+            "session_id": result.get("session_id"),
+            "route": "agentic_rag",
+            "request_id": result.get("request_id"),
+            "debug_id": result.get("debug_id"),
+            "rag_intent": result.get("rag_intent", "unknown"),
+            "source_hints": result.get("source_hints", []),
+            "confidence": result.get("confidence", 0.0),
+            "reason": result.get("reason", ""),
+            "response": result.get("response", ""),
+            "steps": result.get("steps", []),
+            "error": result.get("error"),
+        }
+
+    async def stream(self, query: str, user_id: str, session_id: str | None = None) -> AsyncGenerator[str, None]:
+        result = await self.agentic_rag_graph.invoke(query=query, user_id=user_id, session_id=session_id)
+        yield self._sse_event(
+            {
+                "type": "route",
+                "session_id": result.get("session_id"),
+                "request_id": result.get("request_id"),
+                "debug_id": result.get("debug_id"),
+                "route": "agentic_rag",
+                "rag_intent": result.get("rag_intent", "unknown"),
+                "source_hints": result.get("source_hints", []),
+                "confidence": result.get("confidence", 0.0),
+                "reason": result.get("reason", ""),
+            }
+        )
+        yield self._sse_event(
+            {
+                "type": "response",
+                "content": result.get("response", ""),
+                "session_id": result.get("session_id"),
+                "request_id": result.get("request_id"),
+                "debug_id": result.get("debug_id"),
+            }
+        )
+        yield self._sse_event(
+            {
+                "type": "done",
+                "session_id": result.get("session_id"),
+                "request_id": result.get("request_id"),
+                "debug_id": result.get("debug_id"),
+            }
+        )
 
     @staticmethod
     def _to_rag_memory_context(memories: list[dict[str, Any]]) -> RagMemoryContext | None:
