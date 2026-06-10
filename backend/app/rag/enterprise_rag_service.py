@@ -249,7 +249,6 @@ WebSearch 通用公开参考：
         k: int = 8,
         search_k: int = 40,
         source_hints: list[str] | None = None,
-        strict_source_filter: bool = False,
         rag_intent: str = "unknown",
         router_confidence: float | None = None,
         use_reranker: bool | None = None,
@@ -609,18 +608,6 @@ WebSearch 通用公开参考：
             "rag_intent": rag_intent,
             "router_confidence": router_confidence,
         }
-
-    @staticmethod
-    def _build_source_filter(source_hints: list[str] | None) -> dict[str, Any] | None:
-        if not source_hints:
-            return None
-
-        hints = sorted({source for source in source_hints if source})
-        if not hints:
-            return None
-        if len(hints) == 1:
-            return {"source_type": hints[0]}
-        return {"source_type": {"$in": hints}}
 
     @staticmethod
     def _top_k_for_intent(rag_intent: str) -> int:

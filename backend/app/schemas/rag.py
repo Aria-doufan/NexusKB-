@@ -62,7 +62,6 @@ class RagStrategyConfig(BaseModel):
     use_decompose: bool = False
     allow_expand_top_k: bool = True
     max_retries: int = Field(default=1, ge=0)
-    metadata_filters: dict[str, Any] = Field(default_factory=dict)
     fallback_policy: str = "insufficient_evidence"
 
 

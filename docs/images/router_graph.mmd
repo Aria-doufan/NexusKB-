@@ -1,0 +1,36 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	load_context(load_context)
+	llm_router(llm_router)
+	validate_decision(validate_decision)
+	enterprise_knowledge_node(enterprise_knowledge_node)
+	tool_action_node(tool_action_node)
+	chat_node(chat_node)
+	unsafe_or_system_node(unsafe_or_system_node)
+	clarify_node(clarify_node)
+	persist_message(persist_message)
+	format_response(format_response)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> load_context;
+	chat_node --> persist_message;
+	clarify_node --> persist_message;
+	enterprise_knowledge_node --> persist_message;
+	llm_router --> validate_decision;
+	load_context --> llm_router;
+	persist_message --> format_response;
+	tool_action_node --> persist_message;
+	unsafe_or_system_node --> persist_message;
+	validate_decision -. &nbsp;chat&nbsp; .-> chat_node;
+	validate_decision -. &nbsp;clarify&nbsp; .-> clarify_node;
+	validate_decision -. &nbsp;enterprise_knowledge&nbsp; .-> enterprise_knowledge_node;
+	validate_decision -. &nbsp;tool_action&nbsp; .-> tool_action_node;
+	validate_decision -. &nbsp;unsafe_or_system&nbsp; .-> unsafe_or_system_node;
+	format_response --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

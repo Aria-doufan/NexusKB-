@@ -17,7 +17,6 @@ class StrategyRouter:
         return strategy
 
     def _base_strategy(self, intent: str, state: RagState) -> RagStrategyConfig:
-        source_filters = {"source_hints": state.source_hints}
         if intent == "fact_lookup":
             return RagStrategyConfig(
                 strategy_name="dense_bm25_rrf",
@@ -29,7 +28,6 @@ class StrategyRouter:
                 use_reranker=False,
                 use_query_rewrite=False,
                 use_decompose=False,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         if intent == "semantic_query":
@@ -43,7 +41,6 @@ class StrategyRouter:
                 use_reranker=True,
                 use_query_rewrite=False,
                 use_decompose=False,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         if intent in {"multi_hop", "comparison"}:
@@ -57,7 +54,6 @@ class StrategyRouter:
                 use_reranker=True,
                 use_query_rewrite=False,
                 use_decompose=True,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         if intent == "procedure":
@@ -71,7 +67,6 @@ class StrategyRouter:
                 use_reranker=False,
                 use_query_rewrite=False,
                 use_decompose=False,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         if intent == "constrained":
@@ -85,7 +80,6 @@ class StrategyRouter:
                 use_reranker=True,
                 use_query_rewrite=False,
                 use_decompose=False,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         if intent == "follow_up":
@@ -99,7 +93,6 @@ class StrategyRouter:
                 use_reranker=False,
                 use_query_rewrite=True,
                 use_decompose=False,
-                metadata_filters=source_filters,
                 fallback_policy="insufficient_evidence",
             )
         return RagStrategyConfig(
@@ -112,7 +105,6 @@ class StrategyRouter:
             use_reranker=False,
             use_query_rewrite=False,
             use_decompose=False,
-            metadata_filters=source_filters,
             fallback_policy="insufficient_evidence",
         )
 

@@ -58,7 +58,7 @@ const onSubmit = async (values) => {
         message: result.message
       });
 
-      router.push('/');
+      await router.push('/aichat');
     } else {
       showToast({
         type: 'fail',

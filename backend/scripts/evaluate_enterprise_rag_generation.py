@@ -50,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-dir", type=Path, default=DEFAULT_BASELINE_DIR)
     parser.add_argument("--judge-provider", default=os.getenv("RAGAS_JUDGE_PROVIDER", "openai"))
     parser.add_argument("--judge-model", default=os.getenv("RAGAS_JUDGE_MODEL", "gpt-4o"))
+    parser.add_argument("--embedding-provider", choices=("openai", "ollama"), default=os.getenv("RAGAS_EMBEDDING_PROVIDER", "openai"))
     parser.add_argument("--embedding-model", default=os.getenv("RAGAS_EMBEDDING_MODEL", "text-embedding-3-small"))
+    parser.add_argument("--embedding-base-url", default=os.getenv("RAGAS_EMBEDDING_BASE_URL", "http://localhost:11434"))
     parser.add_argument("--ci", action="store_true", help="Record CI mode in config without enforcing regressions yet.")
     parser.add_argument(
         "--fail-on-regression",
@@ -292,17 +294,29 @@ async def generate_records(questions: list[Question]) -> list[dict[str, Any]]:
     return records
 
 
-def _build_ragas_evaluation_components(judge_model: str, embedding_model: str):
+def _build_ragas_evaluation_components(
+    judge_model: str,
+    embedding_model: str,
+    embedding_provider: str = "openai",
+    embedding_base_url: str = "http://localhost:11434",
+):
     from datasets import Dataset
     from langchain_openai.chat_models import ChatOpenAI
-    from langchain_openai.embeddings import OpenAIEmbeddings
     from ragas import evaluate
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.llms import LangchainLLMWrapper
     from ragas.metrics import AnswerCorrectness, AnswerRelevancy, ContextPrecision, ContextRecall, Faithfulness
 
     llm = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
-    embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model=embedding_model))
+    if embedding_provider == "ollama":
+        from langchain_ollama import OllamaEmbeddings
+
+        embedding_model_instance = OllamaEmbeddings(model=embedding_model, base_url=embedding_base_url)
+    else:
+        from langchain_openai.embeddings import OpenAIEmbeddings
+
+        embedding_model_instance = OpenAIEmbeddings(model=embedding_model)
+    embeddings = LangchainEmbeddingsWrapper(embedding_model_instance)
     metrics = [
         Faithfulness(llm=llm),
         AnswerRelevancy(llm=llm, embeddings=embeddings),
@@ -318,12 +332,19 @@ def run_ragas_evaluation(
     judge_provider: str,
     judge_model: str,
     embedding_model: str,
+    embedding_provider: str = "openai",
+    embedding_base_url: str = "http://localhost:11434",
 ) -> list[dict[str, Any]]:
     if judge_provider != "openai":
         raise ValueError(f"Unsupported RAGAS judge provider for this version: {judge_provider}")
 
     def evaluator(samples: list[dict[str, Any]]) -> list[dict[str, float]]:
-        Dataset, evaluate, metrics, llm = _build_ragas_evaluation_components(judge_model, embedding_model)
+        Dataset, evaluate, metrics, llm = _build_ragas_evaluation_components(
+            judge_model,
+            embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_base_url=embedding_base_url,
+        )
 
         dataset = Dataset.from_list(samples)
         result = evaluate(
@@ -423,14 +444,23 @@ async def async_main() -> int:
     args = parse_args()
     questions = load_questions(args.questions_path, limit=args.limit)
     records = await generate_records(questions)
-    records = run_ragas_evaluation(records, args.judge_provider, args.judge_model, args.embedding_model)
+    records = run_ragas_evaluation(
+        records,
+        args.judge_provider,
+        args.judge_model,
+        args.embedding_model,
+        embedding_provider=args.embedding_provider,
+        embedding_base_url=args.embedding_base_url,
+    )
     summary = summarize_generation_records(records, intended_count=len(questions))
     config = {
         "questions_path": str(args.questions_path),
         "limit": args.limit,
         "judge_provider": args.judge_provider,
         "judge_model": args.judge_model,
+        "embedding_provider": args.embedding_provider,
         "embedding_model": args.embedding_model,
+        "embedding_base_url": args.embedding_base_url,
         "ci": args.ci,
         "fail_on_regression": args.fail_on_regression,
         "git_commit": short_git_commit(),

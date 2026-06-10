@@ -1,0 +1,34 @@
+digraph G {
+  rankdir=LR;
+  label="EnterpriseRagGraph";
+  labelloc=t;
+  fontsize=22;
+  graph [fontname="Microsoft YaHei", bgcolor="white"];
+  node [fontname="Microsoft YaHei", shape=box, style="rounded,filled", fillcolor="#eef7ff", color="#2563eb", penwidth=1.4, margin="0.14,0.08"];
+  edge [fontname="Microsoft YaHei", color="#475569", arrowsize=0.8];
+  "__start__" [label="START", shape=oval, fillcolor="#f8fafc", color="#64748b"];
+  "initialize" [label="initialize"];
+  "planner" [label="planner"];
+  "strategy_select" [label="strategy_select"];
+  "retrieve" [label="retrieve"];
+  "evaluate_context" [label="evaluate_context"];
+  "decide_next_action" [label="decide_next_action"];
+  "apply_retry" [label="apply_retry"];
+  "generate_answer" [label="generate_answer"];
+  "build_insufficient_evidence" [label="build_insufficient_evidence"];
+  "finalize_trace" [label="finalize_trace"];
+  "__end__" [label="END", shape=oval, fillcolor="#f8fafc", color="#64748b"];
+  "__start__" -> "initialize";
+  "apply_retry" -> "retrieve";
+  "build_insufficient_evidence" -> "finalize_trace";
+  "decide_next_action" -> "apply_retry" [label="retry", style=dashed, color="#d97706", fontcolor="#92400e"];
+  "decide_next_action" -> "build_insufficient_evidence" [label="insufficient_evidence", style=dashed, color="#d97706", fontcolor="#92400e"];
+  "decide_next_action" -> "generate_answer" [label="generate", style=dashed, color="#d97706", fontcolor="#92400e"];
+  "evaluate_context" -> "decide_next_action";
+  "generate_answer" -> "finalize_trace";
+  "initialize" -> "planner";
+  "planner" -> "strategy_select";
+  "retrieve" -> "evaluate_context";
+  "strategy_select" -> "retrieve";
+  "finalize_trace" -> "__end__";
+}

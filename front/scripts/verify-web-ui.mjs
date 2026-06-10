@@ -35,10 +35,20 @@ const checks = [
     },
   },
   {
-    name: 'AIChat uses four-column cockpit layout',
+    name: 'AIChat uses desktop cockpit layout',
     pass: () => {
       const page = read('src/views/AIChat.vue');
       return page.includes('chat-cockpit') && page.includes('conversation-rail') && page.includes('evidence-panel');
+    },
+  },
+  {
+    name: 'AIChat evidence panel is closed by default and toggleable',
+    pass: () => {
+      const page = read('src/views/AIChat.vue');
+      return page.includes('const showEvidencePanel = ref(false)')
+        && page.includes('v-if="showEvidencePanel"')
+        && page.includes('@click="showEvidencePanel = !showEvidencePanel"')
+        && !/\.evidence-panel\s*\{\s*display:\s*none;/.test(page);
     },
   },
   {
@@ -73,6 +83,10 @@ const checks = [
   {
     name: 'Auth pages no longer render mobile nav bars',
     pass: () => !read('src/views/Login.vue').includes('<van-nav-bar') && !read('src/views/Register.vue').includes('<van-nav-bar'),
+  },
+  {
+    name: 'Login success navigates directly to AI chat',
+    pass: () => read('src/views/Login.vue').includes("router.push('/aichat')"),
   },
   {
     name: 'Account pages use desktop cards',

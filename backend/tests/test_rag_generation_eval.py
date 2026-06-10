@@ -304,6 +304,69 @@ def test_build_ragas_evaluation_components_configures_llm_embeddings_and_metric_
     ]
 
 
+def test_build_ragas_evaluation_components_can_use_ollama_embeddings(monkeypatch):
+    calls = []
+
+    class FakeDataset:
+        pass
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeOllamaEmbeddings:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeLLMWrapper:
+        def __init__(self, chat_model):
+            self.chat_model = chat_model
+
+    class FakeEmbeddingsWrapper:
+        def __init__(self, embedding_model):
+            self.embedding_model = embedding_model
+
+    def metric_class(name):
+        class FakeMetric:
+            def __init__(self, **kwargs):
+                self.name = name
+                self.kwargs = kwargs
+                calls.append((name, kwargs))
+
+        return FakeMetric
+
+    monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(Dataset=FakeDataset))
+    monkeypatch.setitem(sys.modules, "langchain_openai.chat_models", SimpleNamespace(ChatOpenAI=FakeChatOpenAI))
+    monkeypatch.setitem(sys.modules, "langchain_ollama", SimpleNamespace(OllamaEmbeddings=FakeOllamaEmbeddings))
+    monkeypatch.setitem(sys.modules, "ragas", SimpleNamespace(evaluate=lambda *args, **kwargs: None))
+    monkeypatch.setitem(sys.modules, "ragas.llms", SimpleNamespace(LangchainLLMWrapper=FakeLLMWrapper))
+    monkeypatch.setitem(sys.modules, "ragas.embeddings", SimpleNamespace(LangchainEmbeddingsWrapper=FakeEmbeddingsWrapper))
+    monkeypatch.setitem(
+        sys.modules,
+        "ragas.metrics",
+        SimpleNamespace(
+            AnswerCorrectness=metric_class("answer_correctness"),
+            AnswerRelevancy=metric_class("answer_relevancy"),
+            ContextPrecision=metric_class("context_precision"),
+            ContextRecall=metric_class("context_recall"),
+            Faithfulness=metric_class("faithfulness"),
+        ),
+    )
+
+    rag_generation_eval._build_ragas_evaluation_components(
+        "gpt-5.5",
+        "qwen3-embedding:latest",
+        embedding_provider="ollama",
+        embedding_base_url="http://localhost:11434",
+    )
+
+    answer_relevancy = next(kwargs for name, kwargs in calls if name == "answer_relevancy")
+    assert answer_relevancy["embeddings"].embedding_model.kwargs == {
+        "model": "qwen3-embedding:latest",
+        "base_url": "http://localhost:11434",
+    }
+
+
 def test_apply_ragas_scores_attaches_scores_and_records_metric_errors():
     records = [
         {

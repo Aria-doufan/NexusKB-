@@ -1,3 +1,4 @@
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -72,6 +73,15 @@ class QueryAwareEnterpriseRagService:
         self.generated_queries.append(query)
         self.generated_memory_contexts.append(memory_context)
         return f"answer for {query} using {len(documents)} docs"
+
+
+def test_enterprise_rag_service_retrieve_exposes_only_soft_source_hints():
+    from app.rag.enterprise_rag_service import EnterpriseRagService
+
+    signature = inspect.signature(EnterpriseRagService.retrieve)
+
+    assert "source_hints" in signature.parameters
+    assert "strict_source_filter" not in signature.parameters
 
 
 def test_enterprise_rag_graph_supports_agentic_intent_taxonomy():
@@ -315,8 +325,10 @@ async def test_enterprise_rag_graph_generates_answer_and_saves_trace_for_strong_
     assert response.metrics.retrieval_attempts == 1
     assert service.retrieve_calls[0]["query"] == "Where is the PTO policy?"
     assert service.retrieve_calls[0]["source_hints"] == ["confluence"]
+    assert "metadata_filters" not in service.retrieve_calls[0]
     assert service.retrieve_calls[0]["use_reranker"] is True
     assert service.generated_memory_contexts[0] == state.memory_context
+    assert "metadata_filters" not in trace_store.saved[0].strategy.strategy.model_dump()
     assert trace_store.saved[0].planner.plan.task_type == "constrained"
     assert trace_store.saved[0].strategy.strategy.strategy_name == "dense_bm25_rrf_reranker"
     assert trace_store.saved[0].retrieval_attempts[0].attempt.selected_documents[0].title == "PTO Policy"

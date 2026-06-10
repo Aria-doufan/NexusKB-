@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-cockpit">
+  <div class="chat-cockpit" :class="{ 'chat-cockpit--evidence-open': showEvidencePanel }">
     <aside class="conversation-rail enterprise-card">
       <button class="enterprise-button new-chat-button" @click="startBlankSession">+ 新建会话</button>
       <input v-model="sessionSearch" class="enterprise-input" placeholder="搜索历史会话" />
@@ -39,6 +39,9 @@
           <span class="enterprise-tag">SSE 流式输出</span>
           <span class="enterprise-tag">Markdown</span>
           <span class="enterprise-tag">代码高亮</span>
+          <button class="evidence-toggle" type="button" :aria-expanded="showEvidencePanel" @click="showEvidencePanel = !showEvidencePanel">
+            {{ showEvidencePanel ? '关闭引用' : '引用证据' }}
+          </button>
         </div>
       </header>
 
@@ -84,7 +87,7 @@
       </footer>
     </section>
 
-    <aside class="evidence-panel enterprise-card">
+    <aside v-if="showEvidencePanel" class="evidence-panel enterprise-card">
       <header>
         <p class="shell-eyebrow">Retrieval Evidence</p>
         <h3>引用与检索证据</h3>
@@ -149,6 +152,7 @@ const recommendedPrompts = [
   '知识库中有哪些安全规范？'
 ];
 const evidenceItems = ref([]);
+const showEvidencePanel = ref(false);
 
 const router = useRouter();
 const route = useRoute();
@@ -453,11 +457,15 @@ const loadSessionHistory = (session) => {
 <style scoped>
 .chat-cockpit {
   display: grid;
-  grid-template-columns: 280px minmax(420px, 1fr) 320px;
+  grid-template-columns: 280px minmax(420px, 1fr);
   gap: 20px;
   height: calc(100vh - 142px);
   min-height: 680px;
   color: #172033;
+}
+
+.chat-cockpit--evidence-open {
+  grid-template-columns: 280px minmax(420px, 1fr) 320px;
 }
 
 .enterprise-card {
@@ -663,6 +671,24 @@ const loadSessionHistory = (session) => {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.evidence-toggle {
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  border-radius: 999px;
+  background: #fff;
+  color: #1d4ed8;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 7px 12px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.evidence-toggle:hover {
+  border-color: rgba(37, 99, 235, 0.45);
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.14);
+  transform: translateY(-1px);
 }
 
 .messages-container {
@@ -1061,10 +1087,6 @@ const loadSessionHistory = (session) => {
 @media (max-width: 1200px) {
   .chat-cockpit {
     grid-template-columns: 260px minmax(0, 1fr);
-  }
-
-  .evidence-panel {
-    display: none;
   }
 }
 
