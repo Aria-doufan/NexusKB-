@@ -219,27 +219,21 @@ async def test_agentic_rag_graph_retrieves_inside_single_graph():
             self.retrieve_calls = []
             self.generated = []
 
-        async def retrieve_with_details(self, **kwargs):
+        async def retrieve(self, **kwargs):
             self.retrieve_calls.append(kwargs)
-            document = {
-                "parent_doc_id": "parent-1",
-                "parent_chunk_id": "chunk-1",
-                "source_type": "confluence",
-                "title": "PTO Policy",
-                "section_heading": "Leave",
-                "score": 0.9,
-                "parent_text": "Employees can request PTO in the HR system.",
-                "child_text": "PTO request process",
-                "metadata": {"source_type": "confluence"},
-            }
-            return {
-                "dense_results": [document],
-                "bm25_results": [],
-                "fused_results": [document],
-                "reranked_results": [document],
-                "selected_documents": [document],
-                "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0},
-            }
+            return [
+                {
+                    "parent_doc_id": "parent-1",
+                    "parent_chunk_id": "chunk-1",
+                    "source_type": "confluence",
+                    "title": "PTO Policy",
+                    "section_heading": "Leave",
+                    "score": 0.9,
+                    "parent_text": "Employees can request PTO in the HR system.",
+                    "child_text": "PTO request process",
+                    "metadata": {"source_type": "confluence"},
+                }
+            ]
 
         async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
             self.generated.append({"query": query, "documents": documents, "evidence_mode": evidence_mode})
@@ -276,3 +270,105 @@ async def test_agentic_rag_graph_retrieves_inside_single_graph():
     assert service.retrieve_calls[0]["source_hints"] == ["confluence"]
     assert state.action == "retrieve"
     assert state.evaluator_result.enough_evidence is True
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_builds_insufficient_evidence_answer_when_retrieval_finds_no_documents():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import AgenticActionDecision, RagState
+
+    class EmptyRetrievalService:
+        async def retrieve(self, **kwargs):
+            return []
+
+        async def generate_answer(self, *args, **kwargs):
+            raise AssertionError("insufficient evidence must not call answer generation")
+
+    graph = AgenticRagGraph(
+        service=EmptyRetrievalService(),
+        trace_store=StubTraceStore(),
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="fact_lookup",
+                action="retrieve",
+                needs_retrieval=True,
+                confidence=0.82,
+                reason="Needs internal evidence.",
+            )
+        ),
+    )
+    state = RagState(
+        request_id="req-empty",
+        debug_id="dbg-empty",
+        user_id="user-1",
+        original_query="Where is the travel policy?",
+        current_query="Where is the travel policy?",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert response.answer == "抱歉，我没有找到足够信息来回答：Where is the travel policy?"
+    assert response.sources == []
+    assert state.next_action == "insufficient_evidence"
+    assert state.evaluator_result.enough_evidence is False
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_records_retry_reason_on_followup_retrieval_attempt():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import AgenticActionDecision, RagState
+
+    class RetryRetrievalService:
+        def __init__(self):
+            self.calls = 0
+
+        async def retrieve(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return []
+            return [
+                {
+                    "parent_doc_id": "parent-1",
+                    "parent_chunk_id": "chunk-1",
+                    "source_type": "confluence",
+                    "title": "Travel Policy",
+                    "section_heading": "Booking",
+                    "score": 0.9,
+                    "parent_text": "Travel must be booked in the approved system.",
+                    "child_text": "Travel booking process",
+                    "metadata": {"source_type": "confluence"},
+                }
+            ]
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            return f"generated answer for {query} with {len(documents)} docs"
+
+    graph = AgenticRagGraph(
+        service=RetryRetrievalService(),
+        trace_store=StubTraceStore(),
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="fact_lookup",
+                action="retrieve",
+                needs_retrieval=True,
+                confidence=0.82,
+                reason="Needs internal evidence.",
+            )
+        ),
+    )
+    state = RagState(
+        request_id="req-retry",
+        debug_id="dbg-retry",
+        user_id="user-1",
+        original_query="Where is the travel policy?",
+        current_query="Where is the travel policy?",
+        max_retries=1,
+    )
+
+    await graph.run(state)
+
+    assert [attempt.reason for attempt in state.retrieval_attempts] == [
+        "Initial hybrid retrieval.",
+        "Retry after rewrite_query.",
+    ]

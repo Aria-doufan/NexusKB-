@@ -6,8 +6,8 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from app.rag.enterprise_rag_graph import EnterpriseRagGraph
-from app.schemas.rag import AgenticActionDecision, RagState, RagStrategyConfig, RetrievalAttempt
-from app.schemas.rag_debug import RagDebugTrace, RetrievalAttemptTrace
+from app.schemas.rag import AgenticActionDecision, RagState
+from app.schemas.rag_debug import RagDebugTrace
 
 
 _active_trace_var: ContextVar[RagDebugTrace | None] = ContextVar("agentic_rag_active_trace", default=None)
@@ -179,56 +179,11 @@ class AgenticRagGraph(EnterpriseRagGraph):
             self.planner(state, trace)
         if state.strategy is None:
             self.strategy_select(state, trace)
-        await self.retrieve(state, trace)
+        reason = "Initial hybrid retrieval."
+        if state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count > 0:
+            reason = f"Retry after {state.next_action}."
+        await super().retrieve(state, trace, reason)
         return state
-
-    async def retrieve(self, state: RagState, trace: RagDebugTrace, reason: str = "Initial hybrid retrieval.") -> None:
-        if hasattr(self.service, "retrieve") or not hasattr(self.service, "retrieve_with_details"):
-            await super().retrieve(state, trace, reason)
-            return
-
-        strategy = state.strategy or RagStrategyConfig()
-        if strategy.use_decompose:
-            await self.retrieve_decomposed(state, trace, reason)
-            return
-
-        started = perf_counter()
-        attempt_id = len(state.retrieval_attempts) + 1
-        self._record_event(
-            state,
-            "retrieval_started",
-            "retrieve",
-            data={"attempt_id": attempt_id, "query": state.current_query},
-        )
-        details = await self.service.retrieve_with_details(
-            query=state.current_query,
-            k=strategy.final_top_k,
-            search_k=strategy.fusion_top_k,
-            source_hints=state.source_hints,
-            strict_source_filter=False,
-            rag_intent=state.rag_intent,
-            router_confidence=state.router_confidence,
-            use_reranker=strategy.use_reranker,
-        )
-        raw_documents = details.get("selected_documents") or details.get("reranked_results") or details.get("fused_results") or []
-        selected_documents = [self._to_rag_document(document) for document in raw_documents]
-        state.selected_documents = selected_documents
-        attempt = RetrievalAttempt(
-            attempt_id=attempt_id,
-            query=state.current_query,
-            strategy_name=strategy.strategy_name,
-            selected_documents=selected_documents,
-            elapsed_ms=(perf_counter() - started) * 1000,
-            reason=reason,
-        )
-        state.retrieval_attempts.append(attempt)
-        trace.retrieval_attempts.append(RetrievalAttemptTrace(attempt=attempt))
-        self._record_event(
-            state,
-            "retrieval_finished",
-            "retrieve",
-            data={"attempt_id": attempt.attempt_id, "selected_documents": len(selected_documents)},
-        )
 
     def evaluate_context_node(self, state: RagState) -> RagState:
         self.evaluate_context(state, self._require_trace())
@@ -270,7 +225,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
             return "external_search"
         if state.next_action == "generate":
             return "generate_answer"
-        return "finalize_trace"
+        return "generate_answer"
 
     def _parse_decision(self, raw: Any) -> AgenticActionDecision:
         if isinstance(raw, AgenticActionDecision):
