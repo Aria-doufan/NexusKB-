@@ -273,8 +273,9 @@ async def test_chat_service_delete_memory_raises_404_when_missing(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_router_graph_load_context_includes_long_term_memories(monkeypatch):
-    from app.agent.router_graph import RouterGraph
+async def test_agentic_rag_graph_load_context_includes_long_term_memories(monkeypatch):
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import RagState
 
     class MemoryContext:
         summary = ""
@@ -286,18 +287,28 @@ async def test_router_graph_load_context_includes_long_term_memories(monkeypatch
 
     class MemoryItem:
         def to_dict(self):
-            return {"memory": "用户偏好简洁回答。", "memory_type": "preference"}
+            return {"id": "memory-1", "memory": "用户偏好简洁回答。", "memory_type": "preference"}
 
-    graph = RouterGraph()
+    graph = AgenticRagGraph()
     monkeypatch.setattr(
-        "app.agent.router_graph.conversation_memory_service.get_memory_context",
+        "app.rag.agentic_rag_graph.conversation_memory_service.get_memory_context",
         AsyncMock(return_value=MemoryContext()),
     )
     monkeypatch.setattr(
-        "app.agent.router_graph.long_term_memory_service.search",
+        "app.rag.agentic_rag_graph.long_term_memory_service.search",
         AsyncMock(return_value=[MemoryItem()]),
     )
+    state = RagState(
+        request_id="req-1",
+        debug_id="dbg-1",
+        session_id="s1",
+        user_id="u1",
+        original_query="怎么回答更好",
+        current_query="怎么回答更好",
+    )
 
-    result = await graph.load_context({"query": "怎么回答更好", "session_id": "s1", "user_id": "u1"})
+    await graph.load_context(state)
 
-    assert result["long_term_memories"] == [{"memory": "用户偏好简洁回答。", "memory_type": "preference"}]
+    assert state.long_term_memories == [{"id": "memory-1", "memory": "用户偏好简洁回答。", "memory_type": "preference"}]
+    assert state.memory_context.recalled[0].content == "用户偏好简洁回答。"
+    assert state.memory_context.recalled[0].category == "user_preference"

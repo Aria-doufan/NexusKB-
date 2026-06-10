@@ -13,85 +13,6 @@ os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-class FakeEnterpriseRagGraph:
-    def __init__(self):
-        self.received_state = None
-
-    async def run(self, state):
-        from app.schemas.rag import EvaluationSummary, RagMetrics, RagResponse, RagSource, RagStrategySummary
-
-        self.received_state = state
-        return RagResponse(
-            request_id=state.request_id,
-            debug_id=state.debug_id,
-            session_id=state.session_id,
-            answer="graph answer",
-            sources=[
-                RagSource(
-                    source_id="chunk-1",
-                    title="Policy",
-                    source_type="confluence",
-                    parent_doc_id="parent-1",
-                    parent_chunk_id="chunk-1",
-                    score=0.8,
-                )
-            ],
-            strategy=RagStrategySummary(strategy_name="default", retrieval_mode="hybrid", final_top_k=5),
-            evaluation=EvaluationSummary(
-                enough_evidence=True,
-                covered_aspects=["question"],
-                missing_aspects=[],
-                user_visible_reason=None,
-            ),
-            metrics=RagMetrics(retry_count=0, retrieval_attempts=1, total_ms=10),
-        )
-
-
-@pytest.mark.anyio
-async def test_router_enterprise_node_delegates_to_enterprise_rag_graph_with_rag_state():
-    from app.agent.router_graph import RouterGraph
-
-    router = object.__new__(RouterGraph)
-    router.enterprise_rag_graph = FakeEnterpriseRagGraph()
-    state = {
-        "query": "Where is the PTO policy?",
-        "user_id": "user-1",
-        "session_id": "sess-1",
-        "request_id": "req-1",
-        "debug_id": "dbg-1",
-        "rag_intent": "constrained",
-        "source_hints": ["confluence"],
-        "confidence": 0.88,
-        "reason": "Needs policy source.",
-        "long_term_memories": [
-            {
-                "id": "memory-1",
-                "memory": "User is asking about the NexusKB deployment project.",
-                "memory_type": "project",
-                "score": 0.91,
-                "created_at": "2026-05-24T00:00:00Z",
-            }
-        ],
-    }
-
-    result = await router.enterprise_knowledge_node(state)
-
-    assert result["answer"] == "graph answer"
-    assert result["debug_id"] == "dbg-1"
-    assert result["documents"][0]["title"] == "Policy"
-    assert result["steps"][0]["tool"] == "enterprise_rag_graph"
-    assert result["steps"][0]["tool_output"]["debug_id"] == "dbg-1"
-    rag_state = router.enterprise_rag_graph.received_state
-    assert rag_state.original_query == "Where is the PTO policy?"
-    assert rag_state.current_query == "Where is the PTO policy?"
-    assert rag_state.source_hints == ["confluence"]
-    assert rag_state.router_confidence == 0.88
-    assert rag_state.memory_context.recalled[0].content == "User is asking about the NexusKB deployment project."
-    assert rag_state.memory_context.recalled[0].category == "project_context"
-    assert rag_state.memory_context.recalled[0].relevance_score == 0.91
-    assert rag_state.memory_context.recalled[0].source == "long_term"
-
-
 @pytest.mark.anyio
 async def test_router_invoke_exposes_debug_id_for_agentic_rag_response():
     from app.agent.router_graph import RouterGraph
@@ -126,7 +47,7 @@ def test_router_response_schema_includes_debug_id():
 
     response = RouterResponse(
         session_id="sess-1",
-        route="enterprise_knowledge",
+        route="agentic_rag",
         response="answer",
         debug_id="dbg-public",
         request_id="req-public",
