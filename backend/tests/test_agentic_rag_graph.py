@@ -442,3 +442,68 @@ async def test_agentic_rag_graph_tool_call_uses_tool_node_not_retrieval():
     assert state.response_type == "tool_answer"
     assert state.tool_results[0].tool_name == "what_time_is_now"
     assert tool_runner.calls == [{"query": "现在几点？", "required_tools": ["what_time_is_now"]}]
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_invoke_loads_context_and_persists_messages(monkeypatch):
+    from app.rag import agentic_rag_graph
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import AgenticActionDecision
+
+    persisted = []
+
+    class MemoryContext:
+        summary = "compressed memory"
+        compressed_turns = 1
+        total_turns = 2
+
+        def to_agent_history(self):
+            return [("hi", "hello")]
+
+    class ConversationMemoryService:
+        async def get_memory_context(self, session_id, user_id):
+            return MemoryContext()
+
+        async def append_interaction(self, session_id, user_id, user_message, assistant_message):
+            persisted.append(
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "user_message": user_message,
+                    "assistant_message": assistant_message,
+                }
+            )
+
+    class LongTermMemoryService:
+        async def search(self, query, user_id):
+            return []
+
+    monkeypatch.setattr(agentic_rag_graph, "conversation_memory_service", ConversationMemoryService())
+    monkeypatch.setattr(agentic_rag_graph, "long_term_memory_service", LongTermMemoryService())
+
+    graph = AgenticRagGraph(
+        trace_store=StubTraceStore(),
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="general_chat",
+                action="direct_answer",
+                needs_retrieval=False,
+                confidence=0.9,
+                reason="General.",
+            )
+        ),
+    )
+
+    result = await graph.invoke(query="What is LangGraph?", user_id="user-1", session_id="sess-1")
+
+    assert result["session_id"] == "sess-1"
+    assert result["response"] == "这是一个通用问题，可以不检索企业知识库直接回答：What is LangGraph?"
+    assert result["action"] == "direct_answer"
+    assert persisted == [
+        {
+            "session_id": "sess-1",
+            "user_id": "user-1",
+            "user_message": "What is LangGraph?",
+            "assistant_message": "这是一个通用问题，可以不检索企业知识库直接回答：What is LangGraph?",
+        }
+    ]

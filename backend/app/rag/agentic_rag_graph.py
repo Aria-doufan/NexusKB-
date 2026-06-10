@@ -1,4 +1,5 @@
 import json
+import uuid
 from contextvars import ContextVar
 from time import perf_counter
 from typing import Any
@@ -6,9 +7,20 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.agent_tools import AGENTIC_RAG_TOOLS
+from app.core.logger_handler import logger
 from app.rag.enterprise_rag_graph import EnterpriseRagGraph
-from app.schemas.rag import AgenticActionDecision, RagState, ToolExecutionResult
+from app.schemas.rag import (
+    AgenticActionDecision,
+    MemoryItem,
+    RagMemoryContext,
+    RagResponse,
+    RagState,
+    ToolExecutionResult,
+)
 from app.schemas.rag_debug import RagDebugTrace
+from app.services import session_manager as sm
+from app.services.conversation_memory import conversation_memory_service
+from app.services.long_term_memory import long_term_memory_service
 
 
 _active_trace_var: ContextVar[RagDebugTrace | None] = ContextVar("agentic_rag_active_trace", default=None)
@@ -117,6 +129,120 @@ class AgenticRagGraph(EnterpriseRagGraph):
         graph.add_edge("generate_answer", "finalize_trace")
         graph.add_edge("finalize_trace", END)
         return graph.compile()
+
+    async def invoke(self, query: str, user_id: str, session_id: str | None = None) -> dict[str, Any]:
+        session_id = session_id or str(uuid.uuid4())
+        state = RagState(
+            request_id=str(uuid.uuid4()),
+            debug_id=f"rag_dbg_{uuid.uuid4().hex}",
+            session_id=session_id,
+            user_id=user_id,
+            original_query=query,
+            current_query=query,
+        )
+        await self.load_context(state)
+        response = await self.run(state)
+        if response.answer and not state.error:
+            await self.persist_message(state)
+        return {
+            "session_id": session_id,
+            "request_id": response.request_id,
+            "debug_id": response.debug_id,
+            "intent": state.intent,
+            "action": state.action,
+            "rag_intent": state.rag_intent,
+            "source_hints": state.source_hints,
+            "confidence": state.router_confidence,
+            "reason": state.router_reason,
+            "response": response.answer,
+            "sources": [source.model_dump() for source in response.sources],
+            "steps": self._response_steps(state, response),
+            "error": state.error,
+        }
+
+    async def load_context(self, state: RagState) -> None:
+        if not state.session_id:
+            return
+        try:
+            memory_context = await conversation_memory_service.get_memory_context(state.session_id, state.user_id)
+            state.history = memory_context.to_agent_history()
+            state.memory_summary = memory_context.summary
+            state.memory_compressed_turns = memory_context.compressed_turns
+            state.memory_total_turns = memory_context.total_turns
+        except Exception as exc:
+            logger.warning(f"【AgenticRAG】加载压缩记忆失败，回退完整历史: {exc}")
+            try:
+                manager = sm.session_manager
+                if manager is not None:
+                    state.history = await manager.get_history(state.session_id, state.user_id)
+                    state.memory_total_turns = len(state.history)
+            except Exception as history_exc:
+                logger.warning(f"【AgenticRAG】加载完整历史失败: {history_exc}")
+
+        try:
+            memories = await long_term_memory_service.search(state.original_query, state.user_id)
+            state.long_term_memories = [memory.to_dict() if hasattr(memory, "to_dict") else dict(memory) for memory in memories]
+            state.memory_context = self._to_rag_memory_context(state.long_term_memories)
+        except Exception as exc:
+            logger.warning(f"【AgenticRAG】加载长期记忆失败，继续无长期记忆上下文: {exc}")
+
+    async def persist_message(self, state: RagState) -> None:
+        if not state.session_id or not state.answer:
+            return
+        try:
+            await conversation_memory_service.append_interaction(
+                state.session_id,
+                state.user_id,
+                state.original_query,
+                state.answer,
+            )
+        except AttributeError:
+            manager = sm.session_manager
+            if manager is not None:
+                await manager.add_message(state.session_id, state.user_id, state.original_query, state.answer)
+        except Exception as exc:
+            logger.warning(f"【AgenticRAG】持久化消息失败: {exc}")
+
+    @staticmethod
+    def _response_steps(state: RagState, response: RagResponse) -> list[dict[str, Any]]:
+        return [
+            {
+                "tool": "agentic_rag_graph",
+                "tool_input": {
+                    "query": state.original_query,
+                    "intent": state.intent,
+                    "action": state.action,
+                    "source_hints": state.source_hints,
+                },
+                "tool_output": {
+                    "debug_id": response.debug_id,
+                    "sources": [source.model_dump() for source in response.sources],
+                    "strategy": response.strategy.model_dump(),
+                    "evaluation": response.evaluation.model_dump() if response.evaluation else None,
+                    "metrics": response.metrics.model_dump(),
+                    "response_type": state.response_type,
+                    "tool_results": [result.model_dump() for result in state.tool_results],
+                },
+            }
+        ]
+
+    @staticmethod
+    def _to_rag_memory_context(memories: list[dict[str, Any]]) -> RagMemoryContext:
+        recalled = []
+        for memory in memories:
+            memory_type = memory.get("memory_type", "other")
+            category = "user_preference" if memory_type in {"preference", "profile"} else "project_context"
+            recalled.append(
+                MemoryItem(
+                    memory_id=str(memory.get("id") or memory.get("memory_id") or uuid.uuid4()),
+                    content=str(memory.get("memory") or memory.get("content") or ""),
+                    category=category,
+                    relevance_score=float(memory.get("score", 0.0) or 0.0),
+                    source="long_term",
+                    created_at=memory.get("created_at"),
+                )
+            )
+        return RagMemoryContext(recalled=recalled)
 
     async def run(self, state: RagState):
         started = perf_counter()
