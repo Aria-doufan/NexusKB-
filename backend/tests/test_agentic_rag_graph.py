@@ -207,3 +207,72 @@ async def test_agentic_rag_graph_fallback_decision_preserves_existing_routing_fi
     assert state.source_hints == ["confluence"]
     assert state.router_confidence == 0.8
     assert state.router_reason == "preclassified"
+
+
+@pytest.mark.anyio
+async def test_agentic_rag_graph_retrieves_inside_single_graph():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.schemas.rag import AgenticActionDecision, RagState
+
+    class RetrievalService:
+        def __init__(self):
+            self.retrieve_calls = []
+            self.generated = []
+
+        async def retrieve_with_details(self, **kwargs):
+            self.retrieve_calls.append(kwargs)
+            document = {
+                "parent_doc_id": "parent-1",
+                "parent_chunk_id": "chunk-1",
+                "source_type": "confluence",
+                "title": "PTO Policy",
+                "section_heading": "Leave",
+                "score": 0.9,
+                "parent_text": "Employees can request PTO in the HR system.",
+                "child_text": "PTO request process",
+                "metadata": {"source_type": "confluence"},
+            }
+            return {
+                "dense_results": [document],
+                "bm25_results": [],
+                "fused_results": [document],
+                "reranked_results": [document],
+                "selected_documents": [document],
+                "metrics": {"dense_ms": 1.0, "bm25_ms": 1.0, "rrf_ms": 1.0, "rerank_ms": 1.0},
+            }
+
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            self.generated.append({"query": query, "documents": documents, "evidence_mode": evidence_mode})
+            return f"generated answer for {query} with {len(documents)} docs"
+
+    service = RetrievalService()
+    graph = AgenticRagGraph(
+        service=service,
+        trace_store=StubTraceStore(),
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="constrained",
+                action="retrieve",
+                needs_retrieval=True,
+                source_hints=["confluence"],
+                confidence=0.88,
+                reason="Needs internal policy evidence.",
+            )
+        ),
+    )
+    state = RagState(
+        request_id="req-retrieve",
+        debug_id="dbg-retrieve",
+        user_id="user-1",
+        original_query="Where is PTO policy?",
+        current_query="Where is PTO policy?",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert response.answer == "generated answer for Where is PTO policy? with 1 docs"
+    assert response.sources[0].title == "PTO Policy"
+    assert service.retrieve_calls[0]["source_hints"] == ["confluence"]
+    assert state.action == "retrieve"
+    assert state.evaluator_result.enough_evidence is True
