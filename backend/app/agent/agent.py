@@ -1,3 +1,5 @@
+"""Legacy LangChain Agent and PureChat utilities; online Agentic RAG should not depend on this module."""
+
 import os
 import json
 import asyncio

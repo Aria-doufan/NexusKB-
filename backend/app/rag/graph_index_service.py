@@ -1,3 +1,5 @@
+"""Experimental offline Graph RAG indexing path."""
+
 import asyncio
 import hashlib
 import json

@@ -9,6 +9,8 @@ from app.utils.auth_utils import decode_django_jwt
 
 import datetime
 
+
+# Legacy full-agent RAG tools.
 @tool(description="用于从向量数据库里检索文档并生成摘要，返回包含文档列表和摘要的结果。返回格式为：'摘要: [摘要内容]\n\n检索到的文档列表:\n1. [文档1内容]\n2. [文档2内容]\n...'。注意：文档已经过自动重排序，无需再调用重排序工具")
 async def rag_summary_tools(query: str) -> str:
     """RAG 摘要工具"""
@@ -37,6 +39,8 @@ async def reorder_documents_tools(query: str, documents: List[str]) -> str:
     else:
         return f"重排序失败: {result['error']}"
 
+
+# General utility tools.
 @tool(description="当用户明确问自己的ID和用户名时，从JWT中获取当前用户ID和用户名，参数为完整的JWT token字符串")
 async def get_user_info_tools(token: str) -> str:
     """获取用户信息工具"""
@@ -63,17 +67,20 @@ async def what_time_is_now() -> str:
     return f"当前时间是：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
 
+# Tool groups consumed by each graph/wrapper.
 CHAT_SAFE_TOOLS: List[BaseTool] = [
     get_weather_tools,
     what_time_is_now,
 ]
 
+# Agentic RAG intentionally excludes legacy full-agent RAG/reorder tools.
 AGENTIC_RAG_TOOLS: List[BaseTool] = [
     get_weather_tools,
     what_time_is_now,
     get_user_info_tools,
 ]
 
+# Legacy full-agent toolset retained for existing callers.
 FULL_AGENT_TOOLS: List[BaseTool] = [
     rag_summary_tools,
     get_weather_tools,

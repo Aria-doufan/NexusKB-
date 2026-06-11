@@ -58,21 +58,31 @@ Agent 不应该自由决定所有动作，而应该输出受控枚举和可验�
 
 ## 4. 核心模块边界
 
-| 模块 | 职责 | 当前状态 | 可能文件 |
-| --- | --- | --- | --- |
-| API Router | 对外暴露查询、调试、会话、向量接口 | 已完成 / 部分完成 | `backend/app/router/chat.py` |
-| RouterGraph | 旧 API 兼容入口，负责 invoke/stream 字段映射和 SSE 包装 | 已完成 | `backend/app/agent/router_graph.py` |
-| AgenticRagGraph | 单一 LangGraph 主状态机，负责 action 路由、记忆加载、工具/检索/澄清/拒绝分支 | 已完成 / 持续优化 | `backend/app/rag/agentic_rag_graph.py` |
-| RagEvidenceWorkflow | 企业 RAG 证据主编排，负责 planner、strategy、retrieval、evaluation、retry、fallback、generation、trace | 已完成 / 持续优化 | `backend/app/rag/rag_evidence_workflow.py` |
-| EnterpriseRagGraph | 兼容包装器，内部委托 RagEvidenceWorkflow | 已完成 | `backend/app/rag/enterprise_rag_graph.py` |
-| EnterpriseRagService | 企业 RAG 底层检索服务 | 已完成 | `backend/app/rag/enterprise_rag_service.py` |
-| Retriever | dense、BM25、metadata、RRF、reranker 结果归一化 | 已完成 | `backend/app/rag/retrieval_pipeline.py` |
-| Reranker | Qwen3 reranker 封装 | 已完成 | `backend/app/rag/reorder_service.py` 或等价模块 |
-| Context Builder | parent 回填、去重、压缩、引用选择 | 部分完成 / 待实现 | `backend/app/rag/context_builder.py` |
-| Response Schema | Pydantic 响应模型 | 待实现 | `backend/app/schemas/rag.py` |
-| SSE Schema | 流式事件协议 | 待实现 | `backend/app/schemas/sse.py` |
-| Evaluation | 离线评测、失败样例、报告 | 部分完成 | `backend/scripts/evaluate_*.py` |
-| Security Guard | prompt injection、ACL、引用过滤 | 部分完成 / 待实现 | `backend/app/security/*` 或现有依赖 |
+在线主链路优先看 `mainline` 行：`AgenticRagGraph` 负责在线 LangGraph 状态机和动作路由，`RagEvidenceWorkflow` 负责证据工作流，`RetrievalPipeline` 负责检索归一化和编排。`adapter` 仅保留兼容入口，`knowledge source adapter` 接入不同知识来源，`legacy` 与 `experimental` 不应被误认为在线主线。
+
+| 分类 | 文件 | 在线角色 |
+| --- | --- | --- |
+| mainline | `backend/app/rag/agentic_rag_graph.py` | 在线 LangGraph state machine；拥有 action routing 和 context loading。 |
+| mainline | `backend/app/rag/rag_evidence_workflow.py` | Evidence workflow；拥有 planning、strategy、retrieval、evaluation、retry/fallback、generation、trace finalization。 |
+| mainline | `backend/app/rag/retrieval_pipeline.py` | Retrieval normalization/orchestration；应演进为统一 source-aware evidence retrieval。 |
+| mainline | `backend/app/rag/strategy_router.py` | Strategy matrix for `rag_intent`、confidence、reranker、decompose、retry choices。 |
+| mainline | `backend/app/schemas/rag.py` | Main RAG state、strategy、source、metrics、response models。 |
+| mainline | `backend/app/schemas/rag_debug.py` | Debug trace schema for observing evidence workflow。 |
+| mainline | `backend/app/services/conversation_memory.py` | Conversation summary 和 recent-history context。 |
+| mainline | `backend/app/services/long_term_memory.py` | Long-term memory recall for Agentic RAG context。 |
+| adapter | `backend/app/agent/router_graph.py` | Compatibility adapter around `AgenticRagGraph` for existing API response fields and SSE event shape。 |
+| adapter | `backend/app/rag/enterprise_rag_graph.py` | Compatibility adapter around `RagEvidenceWorkflow` for tests/evaluation scripts。 |
+| knowledge source adapter | `backend/app/rag/enterprise_rag_service.py` | Enterprise corpus retrieval source adapter behind `RetrievalPipeline`。 |
+| knowledge source adapter | `backend/app/rag/rag_service.py` | Uploaded-document retrieval backend / candidate supplemental source；target source-specific backend, not currently wired into online evidence path。 |
+| knowledge source adapter | `backend/app/rag/vector_store.py` | Chroma vector storage for uploaded documents。 |
+| legacy | `backend/app/agent/agent.py` | Legacy LangChain Agent and PureChat utilities。 |
+| legacy | `backend/app/agent/agent_middleware.py` | Legacy Agent middleware tied to legacy Agent usage。 |
+| legacy | `backend/app/agent/agent_tools.py` | Mixed legacy full-agent tools plus Agentic RAG tool subset；clarified in place。 |
+| experimental | `backend/app/rag/graph_extraction.py` | Graph RAG extraction experiment。 |
+| experimental | `backend/app/rag/graph_index_service.py` | Graph RAG indexing experiment。 |
+| experimental | `backend/scripts/index_enterprise_graph.py` | Offline graph index script。 |
+
+上传文档应被理解为统一 evidence layer 方向下的补充知识来源，而不是与 Agentic RAG 并行竞争的另一条产品线。当前状态下 `RagService` 是上传文档检索后端 / 候选补充来源，目标方向是作为 source-specific backend 接入统一 source-aware evidence retrieval；除非后续代码接线完成，不应表述为已进入在线主证据链路。
 
 ## 5. Pydantic Response Schema
 

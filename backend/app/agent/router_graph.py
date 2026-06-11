@@ -1,3 +1,8 @@
+"""Compatibility adapter around AgenticRagGraph for existing API response fields and SSE event shape.
+
+RouterGraph preserves the public API contract while AgenticRagGraph owns the orchestration and business logic.
+"""
+
 import json
 from typing import Any, AsyncGenerator
 

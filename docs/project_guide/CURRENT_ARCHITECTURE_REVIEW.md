@@ -312,6 +312,8 @@ source_hints 不做硬过滤，只给匹配来源的文档加权。
 - 支持 reranker 重排序。
 - 支持文档摘要生成。
 
+定位说明：上传文档是统一 evidence layer 方向下的补充知识来源，不是独立竞争的 RAG 产品线。当前 `RagService` 仍主要是上传文档检索后端 / 候选补充来源；目标方向是作为 source-specific backend 接入统一 evidence workflow，但当前在线 `AgenticRagGraph` 的 retrieve 分支仍经由 `RagEvidenceWorkflow` 和 `EnterpriseRagService`。
+
 该模块当前主要服务：
 
 - `/api/rag/query`

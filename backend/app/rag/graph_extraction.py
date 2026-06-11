@@ -1,3 +1,5 @@
+"""Experimental offline Graph RAG extraction path."""
+
 import re
 from dataclasses import dataclass
 from typing import Any

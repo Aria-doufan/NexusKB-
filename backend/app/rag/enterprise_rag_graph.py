@@ -1,3 +1,5 @@
+"""Compatibility adapter around RagEvidenceWorkflow for tests and evaluation scripts."""
+
 from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
 from app.schemas.rag import RagResponse, RagState
 
