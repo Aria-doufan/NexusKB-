@@ -4,33 +4,50 @@ config:
     curve: linear
 ---
 graph TD;
-	__start__([<p>__start__</p>]):::first
-	load_context(load_context)
-	llm_router(llm_router)
-	validate_decision(validate_decision)
-	enterprise_knowledge_node(enterprise_knowledge_node)
-	tool_action_node(tool_action_node)
-	chat_node(chat_node)
-	unsafe_or_system_node(unsafe_or_system_node)
-	clarify_node(clarify_node)
-	persist_message(persist_message)
-	format_response(format_response)
-	__end__([<p>__end__</p>]):::last
-	__start__ --> load_context;
-	chat_node --> persist_message;
-	clarify_node --> persist_message;
-	enterprise_knowledge_node --> persist_message;
-	llm_router --> validate_decision;
-	load_context --> llm_router;
-	persist_message --> format_response;
-	tool_action_node --> persist_message;
-	unsafe_or_system_node --> persist_message;
-	validate_decision -. &nbsp;chat&nbsp; .-> chat_node;
-	validate_decision -. &nbsp;clarify&nbsp; .-> clarify_node;
-	validate_decision -. &nbsp;enterprise_knowledge&nbsp; .-> enterprise_knowledge_node;
-	validate_decision -. &nbsp;tool_action&nbsp; .-> tool_action_node;
-	validate_decision -. &nbsp;unsafe_or_system&nbsp; .-> unsafe_or_system_node;
-	format_response --> __end__;
-	classDef default fill:#f2f0ff,line-height:1.2
-	classDef first fill-opacity:0
-	classDef last fill:#bfb6fc
+    __start__([<p>__start__</p>]):::first
+    router_graph[RouterGraph compatibility wrapper]
+    agentic_graph[AgenticRagGraph]
+    initialize(initialize)
+    understand_request(understand_request)
+    safety_check(safety_check)
+    direct_answer(direct_answer)
+    clarify(clarify)
+    refuse(refuse)
+    tool_call(tool_call)
+    retrieve(retrieve)
+    evaluate_context(evaluate_context)
+    decide_next_action(decide_next_action)
+    apply_retry(apply_retry)
+    external_search(external_search)
+    generate_answer(generate_answer)
+    finalize_trace(finalize_trace)
+    __end__([<p>__end__</p>]):::last
+
+    __start__ --> router_graph;
+    router_graph --> agentic_graph;
+    agentic_graph --> initialize;
+    initialize --> understand_request;
+    understand_request --> safety_check;
+    safety_check -. direct_answer .-> direct_answer;
+    safety_check -. clarify .-> clarify;
+    safety_check -. refuse .-> refuse;
+    safety_check -. tool_call .-> tool_call;
+    safety_check -. retrieve .-> retrieve;
+    retrieve --> evaluate_context;
+    evaluate_context --> decide_next_action;
+    decide_next_action -. retry .-> apply_retry;
+    apply_retry --> retrieve;
+    decide_next_action -. external_search .-> external_search;
+    external_search --> generate_answer;
+    decide_next_action -. generate .-> generate_answer;
+    decide_next_action -. insufficient_evidence .-> generate_answer;
+    direct_answer --> finalize_trace;
+    clarify --> finalize_trace;
+    refuse --> finalize_trace;
+    tool_call --> finalize_trace;
+    generate_answer --> finalize_trace;
+    finalize_trace --> __end__;
+
+    classDef default fill:#f2f0ff,line-height:1.2
+    classDef first fill-opacity:0
+    classDef last fill:#bfb6fc

@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 后端总览 | [backend.md](./backend.md) | FastAPI 主后端结构、核心职责和运行依赖 |
 | Chat Agent MVP | [chat-agent-mvp.md](./chat-agent-mvp.md) | 普通聊天、工具调用、企业知识库路由边界 |
-| Agent Router | [agent-router.md](./agent-router.md) | LangGraph RouterGraph 设计、状态和节点职责 |
+| Agentic RAG 主入口 | [agent-router.md](./agent-router.md) | RouterGraph 兼容层、AgenticRagGraph 状态机和 RAG evidence workflow 边界 |
 | 企业 RAG 与检索 | [rag-retrieval.md](./rag-retrieval.md) | parent-child 分块、混合召回、reranker 策略 |
 | 会话记忆 | [conversation-memory.md](./conversation-memory.md) | Working Memory、Session Memory 与压缩策略 |
 | 长期记忆模块 | [memory-module.md](./memory-module.md) | 长期记忆抽取、存储、召回、去重和删除链路 |

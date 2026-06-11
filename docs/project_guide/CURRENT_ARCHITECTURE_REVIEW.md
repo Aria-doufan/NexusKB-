@@ -10,19 +10,19 @@
 
 - FastAPI 提供 HTTP API 和 SSE 流式接口。
 - LangChain 负责 LLM Chain、Tool Agent、Prompt 和工具编排。
-- RouterGraph 作为聊天主入口，先判断用户意图，再进入对应链路。
-- 企业知识库使用 RAG 检索增强生成。
-- 普通聊天使用轻量 PureChat 链，不默认进入完整 Tool Agent。
+- RouterGraph 作为兼容入口承接旧 API，实际委托 `AgenticRagGraph` 执行。
+- `AgenticRagGraph` 作为单一 LangGraph 主状态机，统一处理直接回答、检索回答、工具调用、澄清和拒绝。
+- 企业知识库使用 `RagEvidenceWorkflow` 编排检索、证据评估、重试、生成和调试追踪。
 - 会话历史和压缩记忆由 MySQL 持久化。
 - Redis 用于限流、缓存和 JWT 黑名单检查。
 
-当前主目标不是单纯做一个“能回答问题”的聊天接口，而是把系统拆成清晰的多链路智能服务：
+当前主目标不是单纯做一个“能回答问题”的聊天接口，而是把系统收敛成可观测、可评估、可扩展的 Agentic RAG 主链路：
 
-- 普通聊天
-- 企业知识库问答
-- 工具调用
-- 澄清反问
-- 危险/系统类请求拦截
+- 直接回答：不需要检索或工具时快速返回。
+- 检索回答：通过企业 RAG evidence workflow 生成有来源答案。
+- 工具调用：只执行受控工具集合。
+- 澄清反问：范围、目标或上下文不足时先补充信息。
+- 安全拒绝：高风险或破坏性请求直接拒绝。
 
 ### 2. 当前主链路
 
@@ -31,18 +31,16 @@
 ```text
 用户消息
   -> FastAPI /api/agent/query/stream
-  -> RouterGraph
-  -> load_context 加载会话记忆
-  -> LLM Router 判断意图
-  -> validate_decision 校验路由结果
-  -> 按 route 分支执行
-      -> chat: PureChat 轻链路
-      -> enterprise_knowledge: 企业 RAG 链路
-      -> tool_action: 完整 Tool Agent
-      -> clarify: 澄清反问
-      -> unsafe_or_system: 危险/系统请求拦截
-  -> SSE 返回
-  -> 写入会话历史并更新压缩记忆
+  -> RouterGraph 兼容入口
+  -> AgenticRagGraph.invoke()
+  -> load_context 加载会话压缩记忆 + 长期记忆
+  -> LangGraph 状态机
+      -> understand_request 产出 action/rag_intent/source_hints/confidence
+      -> safety_check 选择 direct_answer / retrieve / tool_call / clarify / refuse
+      -> retrieve 分支委托 RagEvidenceWorkflow
+      -> evaluate_context / retry / generate_answer / insufficient evidence
+  -> RouterGraph.stream() 输出兼容 SSE 事件
+  -> 回答成功后写入会话历史
 ```
 
 用图表示：
@@ -50,41 +48,45 @@
 ```mermaid
 flowchart TD
     User["用户消息"] --> API["FastAPI: /api/agent/query/stream"]
-    API --> Router["RouterGraph.stream"]
-    Router --> Context["加载会话历史/压缩记忆"]
-    Context --> Judge["LLM Router 意图判断"]
-    Judge --> Validate["路由结果校验"]
+    API --> Router["RouterGraph.stream 兼容入口"]
+    Router --> Graph["AgenticRagGraph"]
+    Graph --> Context["加载会话记忆 + 长期记忆"]
+    Context --> Understand["understand_request"]
+    Understand --> Safety["safety_check"]
 
-    Validate --> Chat["chat: PureChat"]
-    Validate --> RAG["enterprise_knowledge: 企业 RAG"]
-    Validate --> Agent["tool_action: Tool Agent"]
-    Validate --> Clarify["clarify: 澄清反问"]
-    Validate --> Unsafe["unsafe_or_system: 安全拦截"]
+    Safety --> Direct["direct_answer"]
+    Safety --> Retrieve["retrieve"]
+    Safety --> Tool["tool_call"]
+    Safety --> Clarify["clarify"]
+    Safety --> Refuse["refuse"]
 
-    Chat --> SSE["SSE 响应"]
-    RAG --> SSE
-    Agent --> SSE
+    Retrieve --> Workflow["RagEvidenceWorkflow"]
+    Workflow --> Eval["evaluate_context / retry / generate"]
+
+    Direct --> SSE["SSE 响应"]
+    Eval --> SSE
+    Tool --> SSE
     Clarify --> SSE
-    Unsafe --> SSE
+    Refuse --> SSE
 
-    SSE --> Memory["写入会话历史/更新记忆"]
+    SSE --> Memory["成功回答写入会话历史"]
 ```
 
 ### 3. 当前已完成的关键演进
 
 最近已经完成三件核心事情：
 
-1. 统一聊天主入口
+1. 收敛单一 Agentic RAG 图所有权
 
-   流式聊天不再直接进入 Agent，而是先经过 RouterGraph。系统会先判断用户消息属于普通聊天、企业知识库、工具调用、澄清还是危险请求。
+   `RouterGraph` 不再维护旧多分支图，而是兼容旧 API 并委托 `AgenticRagGraph`。`AgenticRagGraph` 统一拥有 LangGraph 状态机和 action 分支。
 
-2. 拆出纯聊天链
+2. 抽出 RAG evidence workflow
 
-   普通聊天走 PureChat，只使用会话记忆和基础 LLM，不再默认进入完整 Tool Agent。只有明确需要工具时才进入 Tool Agent。
+   企业检索、证据评估、重试、外部搜索回退、证据不足响应和生成逻辑集中到 `RagEvidenceWorkflow`，`EnterpriseRagGraph` 只保留兼容包装。
 
 3. 落地 RAG 策略矩阵
 
-   企业知识库默认使用 Chroma + BM25 + RRF；复杂、精确、低置信度问题启用 reranker；来源提示做软加权，不做硬过滤；简单闲聊和通用写作改写不查企业知识库。
+   企业知识库默认使用 Chroma + BM25 + RRF；语义、约束、低置信度问题启用 reranker；multi-hop / comparison 启用 decompose；来源提示做软加权，不做硬过滤。
 
 ### 4. 技术栈总览
 
@@ -92,7 +94,7 @@ flowchart TD
 | --- | --- | --- |
 | Web 框架 | FastAPI, Starlette, Uvicorn | API、依赖注入、SSE 流式响应 |
 | LLM 编排 | LangChain, LangChain Core | Chain、Prompt、Tool、Agent |
-| 路由编排 | LangGraph StateGraph | RouterGraph 多分支主链路 |
+| 路由编排 | LangGraph StateGraph | `AgenticRagGraph` 主状态机；`RouterGraph` 只做兼容包装 |
 | LLM 调用 | ChatOpenAI 兼容接口 | DeepSeek 或 OpenAI-compatible 服务 |
 | 向量库 | Chroma / langchain-chroma | 企业知识库和上传知识库向量检索 |
 | Embedding | OllamaEmbeddings | 本地 embedding 服务 |
@@ -151,43 +153,34 @@ router_graph.stream(request.query, user_id, session_id)
 | `/api/vector/clean` | 清理用户上传向量 |
 | `/api/reorder` | 文档重排序接口 |
 
-### 2. RouterGraph 模块
+### 2. RouterGraph / AgenticRagGraph 模块
 
 位置：
 
 - `backend/app/agent/router_graph.py`
+- `backend/app/rag/agentic_rag_graph.py`
 
 职责：
 
-- 作为聊天系统的主调度器。
-- 先加载会话上下文。
-- 调用 LLM Router 判断 route。
-- 校验 route、rag_intent、source_hints、confidence。
-- 分派到对应链路。
-- 非流式场景负责统一写入历史。
-- 流式场景把流交给下游链路。
+- `RouterGraph` 作为旧 API 兼容入口，负责 `invoke()` / `stream()` 字段映射和 SSE 包装。
+- `AgenticRagGraph` 作为聊天系统的主 LangGraph 状态机。
+- `load_context()` 加载会话压缩记忆、最近历史和长期记忆。
+- `understand_request` 输出 `AgenticActionDecision`。
+- `safety_check` 把请求路由到 direct answer、retrieve、tool call、clarify 或 refuse。
+- `retrieve` 分支委托 `RagEvidenceWorkflow` 完成证据链路。
+- 回答成功且无错误时写入会话历史。
 
-当前支持的 route：
+当前支持的 action：
 
-| route | 含义 | 下游链路 |
+| action | 含义 | 下游链路 |
 | --- | --- | --- |
-| `chat` | 普通聊天、通用解释、写作改写、安全小工具 | PureChat |
-| `enterprise_knowledge` | 需要企业知识库、内部资料、制度、项目细节 | EnterpriseRagService |
-| `tool_action` | 需要受控工具、内部/外部 API、用户信息、系统状态 | Full Tool Agent |
-| `clarify` | 意图不明确或缺少必要条件 | 澄清反问 |
-| `unsafe_or_system` | 删除、清空、重置、越权等危险请求 | 安全拦截 |
+| `direct_answer` | 不需要企业知识库或工具的直接回答 | `direct_answer_node` |
+| `retrieve` | 需要企业知识库证据的问题 | `RagEvidenceWorkflow` |
+| `tool_call` | 需要受控工具执行的问题 | `AgenticToolRunner` |
+| `clarify` | 意图、目标、范围或上下文不足 | `clarify_node` |
+| `refuse` | 高风险或破坏性请求 | `refuse_node` |
 
-Router 输出结构：
-
-```json
-{
-  "route": "enterprise_knowledge",
-  "rag_intent": "constrained",
-  "source_hints": ["confluence"],
-  "confidence": 0.82,
-  "reason": "用户询问企业内部制度"
-}
-```
+当前兼容 SSE 的 route 事件仍会返回 `route: "agentic_rag"`，同时携带 `rag_intent`、`source_hints`、`confidence`、`reason`、`request_id` 和 `debug_id`。
 
 ### 3. PureChat 普通聊天模块
 
@@ -260,41 +253,36 @@ PureChat 的意义：
 | `chat_safe` | 只包含天气、时间等低风险工具 |
 | `full` | 包含 RAG、用户信息、重排序等完整工具 |
 
-### 5. 企业 RAG 模块
+### 5. 企业 RAG evidence workflow 模块
 
 位置：
 
+- `backend/app/rag/rag_evidence_workflow.py`
+- `backend/app/rag/retrieval_pipeline.py`
 - `backend/app/rag/enterprise_rag_service.py`
+- `backend/app/rag/strategy_router.py`
+- `backend/app/rag/enterprise_rag_graph.py`
 
 职责：
 
-- 处理 Router 分到 `enterprise_knowledge` 的请求。
-- 面向 EnterpriseRAG-Bench parent-child 数据集。
-- 使用 Chroma + BM25 + RRF 做默认混合检索。
-- 根据问题复杂度和 Router 置信度决定是否启用 reranker。
-- 根据 source_hints 做软加权。
-- 基于检索结果生成回答。
+- `RagEvidenceWorkflow` 处理 `AgenticRagGraph` 的 `retrieve` 分支。
+- `StrategyRouter` 根据 `rag_intent` 和 `router_confidence` 选择 `RagStrategyConfig`。
+- `RetrievalPipeline` 调用 `EnterpriseRagService.retrieve_with_details()`，产出 dense、BM25、RRF、rerank 和 selected document 细节。
+- `EnterpriseRagService` 面向 EnterpriseRAG-Bench parent-child 数据集执行底层检索。
+- `EnterpriseRagGraph` 只保留兼容包装，内部委托 `RagEvidenceWorkflow`。
 
 当前 RAG 策略矩阵：
 
 | 场景 | 策略 |
 | --- | --- |
-| 默认企业知识库问题 | Chroma + BM25 + RRF |
-| 复杂问题 | 启用 reranker |
-| 精确/约束问题 | 启用 reranker |
-| Router 低置信度 | 启用 reranker |
-| 有来源提示 | source hint soft boost |
-| 简单闲聊/通用解释/写作改写 | Router 分到 chat，不查企业知识库 |
-
-当前复杂 intent 包括：
-
-- `semantic`
-- `intra_document_reasoning`
-- `project_related`
-- `constrained`
-- `conflicting_info`
-- `completeness`
-- `high_level`
+| `fact_lookup` | Chroma + BM25 + RRF，默认不 rerank |
+| `semantic_query` | Chroma + BM25 + RRF + reranker |
+| `multi_hop` / `comparison` | 扩大 topK，启用 reranker 和 decompose |
+| `procedure` | 扩大检索规模，默认不 rerank |
+| `constrained` | 扩大检索规模并启用 reranker |
+| `follow_up` | 启用 history-aware query rewrite |
+| 低置信度 | 升级为 `low_confidence_hybrid_reranker` |
+| 有来源提示 | source hint soft boost，不做硬过滤 |
 
 低置信度阈值：
 
@@ -440,57 +428,72 @@ DOCX 当前需要重点复核 loader 是否真正适配 Word 二进制格式，�
 
 ## 三、详细
 
-### 1. RouterGraph 的详细执行逻辑
+### 1. AgenticRagGraph 的详细执行逻辑
 
-RouterGraph 的状态结构包含：
+当前 `RouterGraph` 的状态结构已经下沉为 `RagState`。关键字段包括：
 
 ```python
-query: str
+request_id: str
+debug_id: str
+session_id: str | None
 user_id: str
-session_id: str
-history: list[tuple[str, str]]
-memory_summary: str
-route: str
+original_query: str
+current_query: str
 rag_intent: str
 source_hints: list[str]
-confidence: float
-reason: str
-answer: str
-documents: list
-steps: list
-error: str | None
+router_confidence: float
+router_reason: str
+history: list[tuple[str, str]]
+memory_summary: str
+long_term_memories: list[dict]
+intent: str
+action: direct_answer | retrieve | tool_call | clarify | refuse
+plan: RagPlan | None
+strategy: RagStrategyConfig | None
+retrieval_attempts: list[RetrievalAttempt]
+selected_documents: list[RagDocument]
+evaluator_result: EvaluationResult | None
+answer: str | None
+sources: list[RagSource]
+sse_events: list[dict]
 ```
 
 关键节点：
 
 | 节点 | 作用 |
 | --- | --- |
-| `load_context` | 加载压缩记忆和最近历史 |
-| `llm_router` | 调用 LLM 判断 route |
-| `validate_decision` | 规范化 route、rag_intent、source_hints、confidence |
-| `enterprise_knowledge_node` | 企业 RAG |
-| `tool_action_node` | 完整 Tool Agent |
-| `chat_node` | PureChat |
-| `unsafe_or_system_node` | 危险请求拦截 |
-| `clarify_node` | 澄清反问 |
-| `persist_message` | 写入消息并更新记忆 |
-| `format_response` | 格式化最终结果 |
+| `initialize` | 记录 Agentic 图初始化事件 |
+| `understand_request` | 生成行动决策，写入 intent/action/source_hints/confidence |
+| `safety_check` | 选择 direct_answer / retrieve / tool_call / clarify / refuse |
+| `direct_answer` | 不检索企业知识库直接回答 |
+| `clarify` | 返回澄清问题 |
+| `refuse` | 返回安全拒绝 |
+| `tool_call` | 执行受控工具集合 |
+| `retrieve` | 委托 RAG evidence workflow 做 planner/strategy/retrieval |
+| `evaluate_context` | 评估证据覆盖与引用可用性 |
+| `decide_next_action` | 决定生成、重写、扩大 topK、外部搜索或证据不足 |
+| `apply_retry` | 执行 retry 动作后重新检索 |
+| `external_search` | 记录外部搜索扩展点 |
+| `generate_answer` | 生成 grounded answer 或证据不足响应 |
+| `finalize_trace` | 完成调试 trace |
 
-流式场景下，RouterGraph 会先返回 route 事件：
+流式场景下，`RouterGraph.stream()` 先返回兼容 route 事件：
 
 ```json
 {
   "type": "route",
   "session_id": "...",
-  "route": "chat",
-  "rag_intent": "unknown",
+  "request_id": "...",
+  "debug_id": "rag_dbg_...",
+  "route": "agentic_rag",
+  "rag_intent": "fact_lookup",
   "source_hints": [],
-  "confidence": 0.91,
-  "reason": "普通对话"
+  "confidence": 0.8,
+  "reason": "..."
 }
 ```
 
-然后再交给对应分支继续流式输出。
+然后转发 `RagState.sse_events`，最后输出兼容 `response` 和 `done` 事件。
 
 ### 2. PureChat 和 Tool Agent 的边界
 

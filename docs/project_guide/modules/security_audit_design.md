@@ -153,11 +153,11 @@ AUDIT_EVENT name=<event_name> user_id=<user_id> session_id=<session_id> request_
 
 | 事件名 | 位置 | 状态 |
 | --- | --- | --- |
-| `router.decision` | `RouterGraph.validate_decision()` | 已接入 |
-| `rag.retrieve` | `EnterpriseRagService.retrieve()` | 已接入 |
-| `tool.call.requested` | `agent_middleware.tool_call_hook()` | 已接入，但依赖 middleware 生效 |
-| `tool.call.completed` | `agent_middleware.tool_call_hook()`、Tool Agent intermediate steps | 已接入 |
-| `security.blocked` | `RouterGraph.unsafe_or_system_node()` | 已接入 |
+| `agentic.action_decided` | `AgenticRagGraph.understand_request_node()` | 已接入为 `agentic_action_decided` workflow event |
+| `rag.retrieve` | `RagEvidenceWorkflow.retrieve()` / `EnterpriseRagService.retrieve_with_details()` | 已接入为 workflow event 和底层检索日志 |
+| `tool.call.requested` | `AgenticToolRunner.run()` / agent middleware | 部分接入，需继续统一审计格式 |
+| `tool.call.completed` | `AgenticToolRunner.run()` / Tool Agent intermediate steps | 部分接入 |
+| `security.blocked` | `AgenticRagGraph.refuse_node()` | 已接入为 `refusal_created` workflow event |
 
 ### 不允许进入日志的内容
 

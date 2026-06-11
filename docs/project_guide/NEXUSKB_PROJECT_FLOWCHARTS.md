@@ -17,19 +17,20 @@ flowchart LR
     DjangoFile --> MySQL
     DjangoFile --> Media[(本地媒体/上传文件)]
 
-    FastAPI --> RouterGraph[RouterGraph 路由图]
+    FastAPI --> RouterGraph[RouterGraph 兼容入口]
     FastAPI --> MySQL
     FastAPI --> Redis
     FastAPI --> Chroma[(Chroma 向量库)]
 
-    RouterGraph --> GeneralAgent[LangChain Agent + Tools]
-    RouterGraph --> LegacyRAG[通用 RAG]
-    RouterGraph --> EnterpriseRAG[Enterprise Agentic RAG]
-    RouterGraph --> DirectChat[直接 LLM 对话]
+    RouterGraph --> AgenticGraph[AgenticRagGraph 主状态机]
+    AgenticGraph --> DirectChat[direct_answer]
+    AgenticGraph --> ToolCall[tool_call / AgenticToolRunner]
+    AgenticGraph --> Safety[clarify / refuse]
+    AgenticGraph --> EvidenceWorkflow[RagEvidenceWorkflow]
 
-    GeneralAgent --> DeepSeek[DeepSeek / OpenAI 兼容模型]
-    DirectChat --> DeepSeek
-    LegacyRAG --> Chroma
+    DirectChat --> DeepSeek[DeepSeek / OpenAI 兼容模型]
+    ToolCall --> DeepSeek
+    EvidenceWorkflow --> EnterpriseRAG[EnterpriseRagService 底层检索]
     EnterpriseRAG --> Chroma
     EnterpriseRAG --> BM25[BM25 本地索引]
     EnterpriseRAG --> Reranker[Qwen3 Reranker 可选]
@@ -47,30 +48,32 @@ sequenceDiagram
     participant U as 用户
     participant F as Vue 前端
     participant API as FastAPI Chat API
-    participant R as RouterGraph
+    participant R as RouterGraph 兼容入口
+    participant AG as AgenticRagGraph
     participant M as 长期记忆服务
-    participant ER as EnterpriseRagGraph
+    participant WF as RagEvidenceWorkflow
     participant LLM as LLM
     participant DB as MySQL / Redis / Chroma
 
     U->>F: 输入问题
     F->>API: POST /api/chat 或 SSE 流式请求
     API->>API: 解析 JWT、session_id、request_id、debug_id
-    API->>R: invoke / stream(state)
-    R->>M: 按 user_id + query 召回长期记忆
+    API->>R: invoke / stream(query, user_id, session_id)
+    R->>AG: 委托 AgenticRagGraph.invoke
+    AG->>M: 按 user_id + query 召回长期记忆
     M->>DB: MySQL 读取 + Chroma 语义检索
-    M-->>R: RagMemoryContext / long_term_memories
-    R->>LLM: 路由分类：direct / agent / rag
+    M-->>AG: RagMemoryContext / long_term_memories
+    AG->>AG: understand_request + safety_check
 
-    alt 企业知识库问题
-        R->>ER: 构造 RagState 并运行 Agentic RAG
-        ER->>DB: Chroma + BM25 + reranker 检索证据
-        ER->>ER: 评估证据、必要时 rewrite / expand_top_k
-        ER->>LLM: 带证据和不可信长期记忆生成答案
-        ER-->>R: RagResponse + sources + evaluation
-    else 工具/通用任务
-        R->>LLM: LangChain Agent 调用工具或直接回答
-        LLM-->>R: Agent 输出
+    alt retrieve
+        AG->>WF: 运行 evidence workflow
+        WF->>DB: Chroma + BM25 + reranker 检索证据
+        WF->>WF: planner / strategy / evaluation / retry
+        WF->>LLM: 带证据和不可信长期记忆生成答案
+        WF-->>AG: RagResponse + sources + evaluation
+    else direct_answer / tool_call / clarify / refuse
+        AG->>LLM: 直接回答或受控工具回答
+        LLM-->>AG: 输出
     end
 
     R-->>API: RouterResponse / SSE events
@@ -162,7 +165,7 @@ flowchart TD
     Auth --> Redis[(Redis 黑名单检查)]
     ChatRouter --> ChatService[ChatService]
 
-    ChatService --> RouterGraph[RouterGraph]
+    ChatService --> RouterGraph[RouterGraph 兼容入口]
     ChatService --> SessionManager[database_session_manager]
     ChatService --> ConversationMemory[conversation_memory]
     ChatService --> LongTermMemory[long_term_memory_service]
@@ -172,38 +175,46 @@ flowchart TD
     LongTermMemory --> MySQL
     LongTermMemory --> Chroma[(Chroma long_term_memories)]
 
-    RouterGraph --> Agent[Agent]
-    RouterGraph --> LegacyRAG[Legacy RAG]
-    RouterGraph --> EnterpriseRAG[EnterpriseRagGraph]
+    RouterGraph --> AgenticGraph[AgenticRagGraph]
+    AgenticGraph --> EvidenceWorkflow[RagEvidenceWorkflow]
+    AgenticGraph --> ToolRunner[AgenticToolRunner]
+    EvidenceWorkflow --> EnterpriseRAG[EnterpriseRagService]
 
     ChatService --> Response[RouterResponse / SSE]
 ```
 
-## 6. RouterGraph 路由状态机
+## 6. AgenticRagGraph 路由状态机
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Initialize
-    Initialize --> LoadContext: session_id / user_id
-    LoadContext --> RecallMemory: long-term memory enabled
-    RecallMemory --> RouteIntent
-    LoadContext --> RouteIntent: no memory
+    [*] --> LoadContext: session_id / user_id
+    LoadContext --> Initialize
+    Initialize --> UnderstandRequest
+    UnderstandRequest --> SafetyCheck
 
-    RouteIntent --> ValidateDecision
-    ValidateDecision --> DirectChat: route = chat
-    ValidateDecision --> AgentTools: route = agent
-    ValidateDecision --> GeneralRAG: route = rag / legacy
-    ValidateDecision --> EnterpriseRAG: enterprise intent / knowledge query
+    SafetyCheck --> DirectAnswer: action = direct_answer
+    SafetyCheck --> ToolCall: action = tool_call
+    SafetyCheck --> Clarify: action = clarify
+    SafetyCheck --> Refuse: action = refuse
+    SafetyCheck --> Retrieve: action = retrieve
 
-    DirectChat --> SaveAssistantMessage
-    AgentTools --> SaveAssistantMessage
-    GeneralRAG --> SaveAssistantMessage
-    EnterpriseRAG --> SaveAssistantMessage
+    Retrieve --> EvaluateContext
+    EvaluateContext --> DecideNextAction
+    DecideNextAction --> ApplyRetry: rewrite_query / expand_top_k
+    ApplyRetry --> Retrieve
+    DecideNextAction --> ExternalSearch: external_search
+    ExternalSearch --> GenerateAnswer
+    DecideNextAction --> GenerateAnswer: generate / insufficient_evidence
 
-    SaveAssistantMessage --> ExtractMemory: eligible conversation
-    ExtractMemory --> PersistMemory
-    PersistMemory --> [*]
-    SaveAssistantMessage --> [*]: memory skipped
+    DirectAnswer --> FinalizeTrace
+    ToolCall --> FinalizeTrace
+    Clarify --> FinalizeTrace
+    Refuse --> FinalizeTrace
+    GenerateAnswer --> FinalizeTrace
+
+    FinalizeTrace --> PersistMessage: answer and no error
+    PersistMessage --> [*]
+    FinalizeTrace --> [*]: no persisted answer
 ```
 
 ## 7. LangChain Agent 与工具调用流程
@@ -232,20 +243,19 @@ flowchart TD
     FinalAnswer --> StreamOrReturn[SSE 增量事件或普通响应]
 ```
 
-## 8. Enterprise Agentic RAG 流程
+## 8. RagEvidenceWorkflow 流程
 
 ```mermaid
 flowchart TD
-    Start[RagState] --> InitTrace[initialize_trace]
-    InitTrace --> Planner[planner: 任务类型 / 证据需求]
+    Start[RagState] --> Planner[planner: 任务类型 / 证据需求]
     Planner --> Strategy[strategy_select: hybrid / top_k / reranker / decompose]
     Strategy --> NeedDecompose{use_decompose?}
 
-    NeedDecompose -->|否| Retrieve[单查询 hybrid retrieval]
+    NeedDecompose -->|否| Retrieve[RetrievalPipeline.run 单查询]
     NeedDecompose -->|是| Decompose[decompose_query]
 
     Decompose --> DecomposeOK{子查询有效?}
-    DecomposeOK -->|否| FallbackSingle[清空 stale sub_queries 并回退单查询]
+    DecomposeOK -->|否| FallbackSingle[回退单查询检索]
     DecomposeOK -->|是| RetrieveSub[逐个子查询检索]
 
     Retrieve --> Evaluate[evaluate_context]
@@ -253,19 +263,21 @@ flowchart TD
     RetrieveSub --> MergeScores[merge_decomposed_scores]
     MergeScores --> Evaluate
 
-    Evaluate --> Enough{证据足够且 ACL 允许?}
-    Enough -->|是| Generate[generate_answer]
-    Enough -->|否| Retry{还有 retry budget?}
+    Evaluate --> Decide[decide_next_action]
+    Decide -->|rewrite_query| Rewrite[rewrite_query]
+    Decide -->|expand_top_k| Expand[expand_top_k]
+    Rewrite --> Retrieve
+    Expand --> Retrieve
 
-    Retry -->|rewrite_query| Rewrite[rewrite_query]
-    Retry -->|expand_top_k| Expand[expand_top_k]
-    Retry -->|无| Insufficient[build_insufficient_evidence]
+    Decide -->|external_search| WebDecision[decide_external_search_node]
+    WebDecision --> WebSearch[web_search_node]
+    WebSearch --> MergeEvidence[merge_evidence_node]
+    MergeEvidence --> Generate
 
-    Rewrite --> RetrieveAgain[retrieve]
-    Expand --> RetrieveAgain
-    RetrieveAgain --> Evaluate
+    Decide -->|generate| Generate[generate_answer]
+    Decide -->|insufficient_evidence| Insufficient[build_insufficient_evidence]
 
-    Generate --> Sources[构造 RagSource]
+    Generate --> Sources[构造 RagSource / metrics / evaluation]
     Insufficient --> EmptySources[清空 sources]
     Sources --> Finalize[finalize_trace + RagResponse]
     EmptySources --> Finalize

@@ -57,34 +57,37 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready
 - 完整环境下 `/health/ready` 通过。
 - 日志中出现 `企业 RAG BM25 索引预热任务已启动`。
 
-## 2. Router Graph
+## 2. Agentic RAG 主入口
 
 核心文件：
 
 - `backend/app/agent/router_graph.py`
+- `backend/app/rag/agentic_rag_graph.py`
+- `backend/app/rag/rag_evidence_workflow.py`
 
 接口返回：
 
 | 接口 | 最小返回 |
 | --- | --- |
-| `POST /api/agent/router/query` | `session_id`、`route`、`rag_intent`、`source_hints`、`confidence`、`reason`、`response` |
-| `POST /api/agent/query/stream` | 先输出 `route` 事件，再进入对应分支，最后输出 `done` |
+| `POST /api/agent/router/query` | `session_id`、`route=agentic_rag`、`request_id`、`debug_id`、`rag_intent`、`source_hints`、`confidence`、`reason`、`response`、`steps` |
+| `POST /api/agent/query/stream` | 先输出兼容 `route` 事件，再输出 workflow 阶段事件、`response`、`done` |
 
 延迟与日志：
 
-- 必须输出 `router.load_context`、`router.llm_decision`、`router.validate_decision`、`router.to_route_event`。
-- 流式总耗时输出 `router.stream_total`。
+- `RagResponse.metrics` 至少能表达 `total_ms`、`retrieval_ms`、`generation_ms`、`retry_count`、`retrieval_attempts`。
+- 底层企业 RAG 检索继续输出 `enterprise_rag.*` PERF_METRIC。
+- Debug trace 必须包含 `request_id` 和 `debug_id`，便于定位 planner、strategy、retrieval、evaluation 和 generation。
 
 错误兜底：
 
-- Router LLM 输出非法 JSON 或非法枚举时回退 `chat`。
-- 低置信度且非 `chat/clarify` 时进入 `clarify`。
-- 删除、清空、重置、越权等高风险请求进入 `unsafe_or_system`。
+- decision chain 输出非法 action 时回退安全路径。
+- 低置信度、上下文不足或证据不足时进入 `clarify` 或 evidence-insufficient 响应。
+- 删除、清空、重置、越权等高风险请求进入 `refuse`。
 
 测试命令：
 
 ```powershell
-backend\.venv\Scripts\python.exe -m py_compile backend\app\agent\router_graph.py
+conda run -n NexusKB python -m py_compile backend\app\agent\router_graph.py backend\app\rag\agentic_rag_graph.py backend\app\rag\rag_evidence_workflow.py
 ```
 
 真实接口 smoke test 需要带 JWT：
@@ -100,8 +103,9 @@ Content-Type: application/json
 
 通过条件：
 
-- 企业知识问题返回 `route=enterprise_knowledge`。
-- 普通聊天返回 `route=chat`。
+- 兼容 route 事件返回 `route=agentic_rag`。
+- 企业知识问题触发 `retrieve` action，并返回 `debug_id`、`sources` 或证据不足说明。
+- 普通直接回答不触发企业 RAG 检索。
 - 高风险系统操作返回 `route=unsafe_or_system` 或安全拒绝。
 
 ## 3. PureChat 普通聊天

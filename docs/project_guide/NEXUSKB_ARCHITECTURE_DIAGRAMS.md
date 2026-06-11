@@ -13,10 +13,10 @@
 NexusKB / RAGFlow 是一个面向企业知识库问答的多策略 Agentic RAG 系统：
 
 ```text
-Vue 前端 → Django 用户服务签发 JWT → FastAPI 校验 JWT → RouterGraph 策略路由 → Chat / Tool / Safety / Enterprise RAG → Dense+BM25+RRF+Reranker → SSE 流式返回 → MySQL/Redis/Chroma/评测闭环支撑
+Vue 前端 → Django 用户服务签发 JWT → FastAPI 校验 JWT → RouterGraph 兼容入口 → AgenticRagGraph 主状态机 → direct_answer / retrieve / tool_call / clarify / refuse → RagEvidenceWorkflow → Dense+BM25+RRF+Reranker → SSE 流式返回 → MySQL/Redis/Chroma/评测闭环支撑
 ```
 
-昨天更新后的 Agentic RAG 核心变化是：RouterGraph 不只判断“要不要 RAG”，还要输出受控的 `rag_intent`、`source_hints`、策略开关和调试元数据；复杂问题通过规划中的 decompose 分支拆成 2-4 个子问题并按 evidence coverage 合并证据。
+当前 Agentic RAG 核心变化是：`RouterGraph` 已收敛为旧 API 兼容入口；`AgenticRagGraph` 统一拥有 LangGraph 状态机；`RagEvidenceWorkflow` 统一拥有 planner、strategy、retrieval、evaluation、retry、web fallback、generation 和 trace finalization。
 
 ```mermaid
 flowchart LR
@@ -27,16 +27,17 @@ flowchart LR
     D -->|签发 JWT| F
     B -->|校验 Django JWT| D
 
-    B --> R[RouterGraph / Agentic Router]
-    R --> C[Pure Chat]
-    R --> E[Enterprise RAG]
-    R --> T[Tool Agent 预留]
-    R --> S[Safety / Clarify]
+    B --> R[RouterGraph<br/>兼容入口]
+    R --> AG[AgenticRagGraph<br/>主状态机]
+    AG --> C[direct_answer]
+    AG --> E[RagEvidenceWorkflow]
+    AG --> T[tool_call / AgenticToolRunner]
+    AG --> S[clarify / refuse]
 
-    R --> M[Conversation Memory<br/>recent window + rolling summary]
-    R -.规划/实验.-> LTM[Long-term Memory<br/>MySQL source of truth + Chroma semantic index]
+    AG --> M[Conversation Memory<br/>recent window + rolling summary]
+    AG --> LTM[Long-term Memory<br/>MySQL source of truth + Chroma semantic index]
 
-    E --> STR[Strategy Matrix<br/>rag_intent / source_hints]
+    E --> STR[StrategyRouter<br/>rag_intent / source_hints]
     STR --> QP[Rewrite / HyDE / Decompose<br/>规划/可选]
     QP --> V[Chroma Dense Retrieval]
     QP --> BM[BM25]
@@ -116,8 +117,9 @@ flowchart LR
 
     subgraph AIBackend[FastAPI AI 后端<br/>backend/]
         ChatAPI[/api/agent/query/stream]
-        Router[RouterGraph]
-        RAG[EnterpriseRagService]
+        Router[RouterGraph 兼容入口]
+        Agentic[AgenticRagGraph]
+        RAG[RagEvidenceWorkflow]
         Session[Session / Message / Conversation Memory]
         LTM[Long-term Memory<br/>实验/待完整接线]
         Vector[Vector / BM25 / RRF / Rerank / Classic RAG]
@@ -138,9 +140,10 @@ flowchart LR
     ChatAPI -->|校验 JWT| JWT
     ChatAPI --> Router
     ChatAPI --> Audit
-    Router --> RAG
-    Router --> Session
-    Router -.规划/实验.-> LTM
+    Router --> Agentic
+    Agentic --> RAG
+    Agentic --> Session
+    Agentic --> LTM
 
     Auth --> MySQL
     Profile --> MySQL
@@ -401,10 +404,12 @@ flowchart TD
     MemoryAPI --> LTM[long_term_memory_service]
     MemorySearchAPI --> LTM
 
-    RG --> ER[EnterpriseRagService]
-    RG --> PC[Pure Chat]
-    RG --> TA[Tool Agent]
-    RG --> PM[persist_message]
+    RG --> AG[AgenticRagGraph]
+    AG --> WF[RagEvidenceWorkflow]
+    AG --> PC[direct_answer]
+    AG --> TA[AgenticToolRunner]
+    AG --> PM[persist_message]
+    WF --> ER[EnterpriseRagService]
 
     PM --> MySQL[(MySQL ChatSession / ChatMessage / ChatSessionMemory)]
     LTM --> LTMDB[(MySQL long_term_memories 规划)]
@@ -423,103 +428,105 @@ flowchart TD
 
 ---
 
-## 7. RouterGraph 状态机
+## 7. AgenticRagGraph 状态机
 
-RouterGraph 是在线问答的“大脑”，负责判断问题应该走哪条链路。
+`RouterGraph` 现在是兼容入口；在线问答的“大脑”是 `AgenticRagGraph`，它负责从请求上下文、长期记忆和行动决策中选择下一步。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> load_context
-    load_context --> llm_router
-    llm_router --> validate_decision
+    [*] --> LoadContext
+    LoadContext --> Initialize
+    Initialize --> UnderstandRequest
+    UnderstandRequest --> SafetyCheck
 
-    validate_decision --> enterprise_knowledge_node: enterprise_knowledge
-    validate_decision --> chat_node: chat
-    validate_decision --> tool_action_node: tool_action
-    validate_decision --> clarify_node: clarify
-    validate_decision --> unsafe_or_system_node: unsafe_or_system
+    SafetyCheck --> DirectAnswer: direct_answer
+    SafetyCheck --> Retrieve: retrieve
+    SafetyCheck --> ToolCall: tool_call
+    SafetyCheck --> Clarify: clarify
+    SafetyCheck --> Refuse: refuse
 
-    enterprise_knowledge_node --> persist_message
-    chat_node --> persist_message
-    tool_action_node --> persist_message
-    clarify_node --> persist_message
-    unsafe_or_system_node --> persist_message
+    Retrieve --> EvaluateContext
+    EvaluateContext --> DecideNextAction
+    DecideNextAction --> ApplyRetry: rewrite_query / expand_top_k
+    ApplyRetry --> Retrieve
+    DecideNextAction --> ExternalSearch: external_search
+    ExternalSearch --> GenerateAnswer
+    DecideNextAction --> GenerateAnswer: generate / insufficient_evidence
 
-    persist_message --> format_response
-    format_response --> [*]
+    DirectAnswer --> FinalizeTrace
+    ToolCall --> FinalizeTrace
+    Clarify --> FinalizeTrace
+    Refuse --> FinalizeTrace
+    GenerateAnswer --> FinalizeTrace
+    FinalizeTrace --> [*]
 ```
 
-RouterGraph 的输出可以理解成：
+Agentic 决策输出可以理解成：
 
 ```text
-RouterDecision
-├── route: enterprise_knowledge / chat / tool_action / clarify / unsafe_or_system
-├── confidence: 置信度
-├── rag_intent: 当前代码仍有 basic/semantic/intra_document_reasoning 等旧枚举
-│   └── Agentic RAG 目标枚举：fact_lookup / semantic_query / multi_hop / comparison / procedure / constrained / follow_up / not_enough_info
+AgenticActionDecision
+├── intent / rag_intent: fact_lookup / semantic_query / multi_hop / comparison / procedure / constrained / follow_up / unknown
+├── action: direct_answer / retrieve / tool_call / clarify / refuse
+├── needs_retrieval / needs_tool / needs_clarification / safety_risk
 ├── source_hints: confluence / jira / slack / github / google_drive / linear / gmail / hubspot / fireflies
-├── metadata_filters: 用户/知识库/权限过滤条件，设计中用于约束检索范围
-└── reason: 为什么这样路由
+├── required_tools: 需要执行的受控工具
+├── confidence: 置信度
+└── reason: 为什么这样行动
 ```
 
-实现路线是先保证 RouterGraph 输出受控枚举，再把旧枚举归一化到新 Agentic RAG intent，最后由 EnterpriseRAG 根据 intent 选择检索策略。
+`RagEvidenceWorkflow` 根据 `rag_intent` 和 `confidence` 选择检索策略；`RouterGraph.stream()` 仅把结果包装成旧前端仍能消费的 SSE 事件。
 
 ---
 
-## 8. RouterGraph 五个分支
+## 8. AgenticRagGraph 五个 action
 
 ```mermaid
 flowchart TD
-    R[RouterGraph] --> EK[enterprise_knowledge]
-    R --> CH[chat]
-    R --> TA[tool_action]
-    R --> CL[clarify]
-    R --> US[unsafe_or_system]
+    AG[AgenticRagGraph] --> DA[direct_answer]
+    AG --> RT[retrieve]
+    AG --> TC[tool_call]
+    AG --> CL[clarify]
+    AG --> RF[refuse]
 
-    EK --> EK1[企业知识库问答]
-    EK --> EK2[Dense + BM25 + RRF]
-    EK --> EK3[reranker / parent chunk / citations]
+    DA --> DA1[普通问题直接回答]
+    DA --> DA2[不检索企业知识库]
 
-    CH --> CH1[普通聊天]
-    CH --> CH2[不默认检索知识库]
-    CH --> CH3[成本低 / 延迟低]
+    RT --> WF[RagEvidenceWorkflow]
+    WF --> WF1[planner / strategy_select]
+    WF --> WF2[Dense + BM25 + RRF]
+    WF --> WF3[reranker / decompose / retry / citations]
 
-    TA --> TA1[业务工具/API 预留]
-    TA --> TA2[需要权限和风险控制]
-    TA --> TA3[不能由文档内容触发]
+    TC --> TC1[受控工具集合]
+    TC --> TC2[需要权限和风险控制]
+    TC --> TC3[不能由文档内容触发]
 
     CL --> CL1[信息不足]
     CL --> CL2[指代不明]
-    CL --> CL3[权限或范围不明确]
+    CL --> CL3[目标、范围或上下文不明确]
 
-    US --> US1[系统提示词窃取]
-    US --> US2[越权访问]
-    US --> US3[prompt injection]
-    US --> US4[危险操作]
+    RF --> RF1[高风险请求]
+    RF --> RF2[越权访问]
+    RF --> RF3[prompt injection]
+    RF --> RF4[危险操作]
 ```
 
 ---
 
-## 9. Enterprise RAG Pipeline
+## 9. RagEvidenceWorkflow Pipeline
 
 ```mermaid
 flowchart TD
-    Q[用户问题] --> R[RouterGraph 判断 enterprise_knowledge]
-    R --> SI[rag_intent / source_hints / router_confidence]
+    Q[用户问题] --> AG[AgenticRagGraph action = retrieve]
+    AG --> SI[rag_intent / source_hints / router_confidence]
 
-    SI --> MAT[Strategy Matrix]
-    MAT --> TK[top_k / search_k / reranker 开关]
-    MAT --> OPT{查询规划策略}
+    SI --> PLAN[planner]
+    PLAN --> STR[StrategyRouter]
+    STR --> TK[top_k / final_k / reranker / decompose / retry]
+    TK --> OPT{检索策略}
 
-    OPT -->|当前默认| RAW[原始 Query]
-    OPT -->|semantic_query 可选| RW[Query Rewrite]
-    OPT -->|semantic_query 可选| HYDE[HyDE]
-    OPT -->|multi_hop / comparison 规划| DEC[Decompose 子问题拆解]
-
-    RAW --> RET[单查询检索]
-    RW --> RET
-    HYDE --> RET
-    DEC --> SUB[2-4 个 sub_query]
+    OPT -->|单查询| RET[RetrievalPipeline.run]
+    OPT -->|multi_hop / comparison| DEC[decompose_query]
+    DEC --> SUB[sub_query 列表]
 
     RET --> DENSE[Dense Vector Retrieval<br/>Chroma child chunks]
     RET --> BM25[BM25 Keyword Retrieval<br/>parent/chunk text]
@@ -532,21 +539,24 @@ flowchart TD
 
     DENSE --> RRF[RRF Fusion]
     BM25 --> RRF
-    RRF --> BOOST[Source Hint Soft Boost / Metadata Filter]
+    RRF --> BOOST[Source Hint Soft Boost]
     XMERGE --> BOOST
 
-    BOOST --> RERANK{是否启用 Reranker}
+    BOOST --> RERANK{strategy.use_reranker?}
     RERANK -->|是| RK[Qwen3 CrossEncoder Rerank]
     RERANK -->|否| SKIP[跳过重排]
 
-    RK --> PARENT[Parent Chunk Expansion]
-    SKIP --> PARENT
-
-    PARENT --> COMP[Context Compression / 去重 / token budget]
-    COMP --> CIT[Citation Selection]
-    CIT --> PROMPT[Grounded Prompt]
-    PROMPT --> LLM[LLM 生成]
-    LLM --> ANS[Answer + Sources + Strategy + Metrics + Debug]
+    RK --> SELECT[Selected Documents]
+    SKIP --> SELECT
+    SELECT --> EVAL[evaluate_context]
+    EVAL --> DECIDE[decide_next_action]
+    DECIDE -->|rewrite / expand_top_k| RET
+    DECIDE -->|external_search| WEB[web_search_node + merge_evidence]
+    WEB --> GEN[generate_answer]
+    DECIDE -->|generate| GEN
+    DECIDE -->|insufficient| INSUF[build_insufficient_evidence]
+    GEN --> ANS[RagResponse + Sources + Strategy + Metrics + Debug]
+    INSUF --> ANS
 ```
 
 关键理解：
@@ -1159,8 +1169,8 @@ flowchart TD
 ```mermaid
 flowchart TD
     S1[1. 先看整体服务关系<br/>front / Django / backend] --> S2[2. 看一次请求怎么走<br/>/api/agent/query/stream]
-    S2 --> S3[3. 看 RouterGraph 五个分支]
-    S3 --> S4[4. 深看 Enterprise RAG Pipeline]
+    S2 --> S3[3. 看 AgenticRagGraph 五个 action]
+    S3 --> S4[4. 深看 RagEvidenceWorkflow Pipeline]
     S4 --> S5[5. 理解 Dense + BM25 + RRF + Reranker]
     S5 --> S6[6. 理解 Memory 和 Session]
     S6 --> S7[7. 看长期记忆实验和审计]

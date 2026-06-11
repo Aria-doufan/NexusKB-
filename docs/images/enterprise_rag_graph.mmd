@@ -4,31 +4,48 @@ config:
     curve: linear
 ---
 graph TD;
-	__start__([<p>__start__</p>]):::first
-	initialize(initialize)
-	planner(planner)
-	strategy_select(strategy_select)
-	retrieve(retrieve)
-	evaluate_context(evaluate_context)
-	decide_next_action(decide_next_action)
-	apply_retry(apply_retry)
-	generate_answer(generate_answer)
-	build_insufficient_evidence(build_insufficient_evidence)
-	finalize_trace(finalize_trace)
-	__end__([<p>__end__</p>]):::last
-	__start__ --> initialize;
-	apply_retry --> retrieve;
-	build_insufficient_evidence --> finalize_trace;
-	decide_next_action -. &nbsp;retry&nbsp; .-> apply_retry;
-	decide_next_action -. &nbsp;insufficient_evidence&nbsp; .-> build_insufficient_evidence;
-	decide_next_action -. &nbsp;generate&nbsp; .-> generate_answer;
-	evaluate_context --> decide_next_action;
-	generate_answer --> finalize_trace;
-	initialize --> planner;
-	planner --> strategy_select;
-	retrieve --> evaluate_context;
-	strategy_select --> retrieve;
-	finalize_trace --> __end__;
-	classDef default fill:#f2f0ff,line-height:1.2
-	classDef first fill-opacity:0
-	classDef last fill:#bfb6fc
+    __start__([<p>__start__</p>]):::first
+    wrapper[EnterpriseRagGraph compatibility wrapper]
+    workflow[RagEvidenceWorkflow]
+    planner(planner)
+    strategy_select(strategy_select)
+    retrieve(retrieve)
+    retrieve_decomposed(retrieve_decomposed)
+    evaluate_context(evaluate_context)
+    decide_next_action(decide_next_action)
+    rewrite_query(rewrite_query)
+    expand_top_k(expand_top_k)
+    external_search_decision(decide_external_search_node)
+    web_search(web_search_node)
+    merge_evidence(merge_evidence_node)
+    generate_answer(generate_answer)
+    insufficient(build_insufficient_evidence)
+    finalize_trace(finalize_trace)
+    __end__([<p>__end__</p>]):::last
+
+    __start__ --> wrapper;
+    wrapper --> workflow;
+    workflow --> planner;
+    planner --> strategy_select;
+    strategy_select --> retrieve;
+    retrieve -. use_decompose .-> retrieve_decomposed;
+    retrieve --> evaluate_context;
+    retrieve_decomposed --> evaluate_context;
+    evaluate_context --> decide_next_action;
+    decide_next_action -. rewrite_query .-> rewrite_query;
+    decide_next_action -. expand_top_k .-> expand_top_k;
+    rewrite_query --> retrieve;
+    expand_top_k --> retrieve;
+    decide_next_action -. generate .-> generate_answer;
+    decide_next_action -. external_search .-> external_search_decision;
+    external_search_decision --> web_search;
+    web_search --> merge_evidence;
+    merge_evidence --> generate_answer;
+    decide_next_action -. insufficient_evidence .-> insufficient;
+    generate_answer --> finalize_trace;
+    insufficient --> finalize_trace;
+    finalize_trace --> __end__;
+
+    classDef default fill:#f2f0ff,line-height:1.2
+    classDef first fill-opacity:0
+    classDef last fill:#bfb6fc

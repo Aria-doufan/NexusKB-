@@ -29,10 +29,11 @@
 
 ## 当前主线能力
 
-- Router Graph：已经具备 `rag_query`、`agent_tool_call`、`chat`、`system`、`clarify` 路由。
-- 会话记忆：已经接入 Working Memory 与 Session Memory 两层记忆压缩。
-- 企业 RAG：已经完成 parent-child 分块、Chroma 入库、BM25 混合召回、Qwen3 reranker 评测。
-- 检索评测：已经形成 `hit@K`、`recall@K`、`mrr@K`、延迟等指标记录。
+- Agentic RAG 主图：`RouterGraph` 已收敛为兼容包装器，`AgenticRagGraph` 统一拥有 LangGraph 状态机。
+- 受控行动分支：当前通过 `direct_answer`、`retrieve`、`tool_call`、`clarify`、`refuse` 表达直接回答、检索回答、工具调用、澄清和拒绝。
+- 会话与长期记忆：会话压缩记忆和长期记忆召回由 `AgenticRagGraph.load_context()` 注入到 RAG 状态。
+- 企业 RAG evidence workflow：`RagEvidenceWorkflow` 统一编排 planner、strategy、retrieval、evaluation、retry、web fallback、generation 和 trace finalization。
+- 检索评测：已经形成 `hit@K`、`recall@K`、`mrr@K`、延迟等指标记录，并继续围绕 evidence coverage 与生成质量扩展。
 - 基础工程：FastAPI、Redis、MySQL、JWT、SSE、统一响应和异常处理已具备基础形态。
 
 ## 目标架构
@@ -40,26 +41,28 @@
 ```text
 前端/客户端
   -> FastAPI Chat API
-  -> Router Graph
-       -> 普通聊天链路
-       -> 企业知识库 RAG 链路
-       -> 安全工具调用链路
-       -> 澄清/拒绝/系统保护链路
-  -> 会话记忆与持久化
+  -> RouterGraph 兼容入口
+  -> AgenticRagGraph 主状态机
+       -> direct_answer / retrieve / tool_call / clarify / refuse
+       -> RagEvidenceWorkflow 证据工作流
+       -> AgenticToolRunner 受控工具调用
+  -> 会话记忆、长期记忆与持久化
   -> 观测、评测与持续优化
 ```
 
-RAG 链路的目标形态：
+RAG evidence workflow 的目标形态：
 
 ```text
 用户问题
-  -> 意图识别和上下文补全
+  -> 加载会话摘要、最近历史和长期记忆
+  -> understand_request 产出 intent/action/source_hints/confidence
+  -> planner + strategy_select
   -> Chroma 向量召回 + BM25 关键词召回
-  -> RRF 融合
-  -> 按策略决定是否启用 reranker
-  -> parent chunk 回填
-  -> grounded answer 生成
-  -> 指标与失败样例记录
+  -> RRF 融合 + source_hints soft boost
+  -> 按策略决定是否启用 reranker / decompose / retry
+  -> evidence evaluation
+  -> grounded answer 或证据不足响应
+  -> RagResponse + sources + metrics + debug trace
 ```
 
 ## 文档体系建议

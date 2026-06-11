@@ -210,11 +210,11 @@ Router 判断场景
 
 ## 下一步建议
 
-1. 拆出纯聊天链。
-2. 给工具增加分类 metadata。
-3. 普通 chat 只允许调用 `safe_utility` 和明确的 `personal_action`。
-4. Router SSE 化，让流式主入口也能走简化路由。
-5. 企业知识库继续保持克制调用。
+1. 接入更可靠的 `decision_chain`，让 `understand_request` 能根据用户问题真实判断 action。
+2. 稳定 `RagState.sse_events` 的事件命名和前端展示。
+3. 用离线评测继续调参 `StrategyRouter` 的 topK、reranker 和 decompose 策略。
+4. 完善证据不足、web fallback、debug trace 和前端引用展示。
+5. 保持工具调用边界：工具只能由用户请求和受控 action 触发，不能由检索文档触发。
 
 ## 当前项目实际流程对比
 
@@ -226,78 +226,77 @@ Router 判断场景
 POST /api/agent/query/stream
   -> get_current_user_id
   -> rate_limit
-  -> get_agent_stream_response(query, session_id, user_id)
-      -> conversation_memory_service.get_history_for_agent()
-      -> agent_factory.create_agent_executor()
-          -> 默认工具全集
-             - rag_summary_tools
-             - get_weather_tools
-             - what_time_is_now
-             - get_user_info_tools
-             - reorder_documents_tools
-      -> AgentExecutor.astream()
-      -> 写入 chat_messages
-      -> update_memory()
-      -> SSE done
+  -> router_graph.stream(query, user_id, session_id)
+      -> AgenticRagGraph.invoke()
+          -> load_context: conversation memory + long-term memory
+          -> understand_request
+          -> safety_check
+          -> direct_answer / retrieve / tool_call / clarify / refuse
+          -> finalize_trace
+          -> persist_message
+      -> route 兼容事件
+      -> RagState.sse_events
+      -> response
+      -> done
 ```
 
 当前特点：
 
-- 流式聊天入口没有经过 Router。
-- 默认使用完整 Tool Agent。
-- 普通聊天、天气、时间、RAG、重排序、用户信息工具都在同一个工具池里。
-- 会话记忆已经接入，能读取 Session Memory + Working Memory。
+- 流式聊天入口已经经过 `RouterGraph` 兼容层。
+- `RouterGraph` 不再拥有旧多分支图，主状态机由 `AgenticRagGraph` 拥有。
+- 普通直接回答、RAG、工具调用、澄清和拒绝由 action 分支隔离。
+- 会话压缩记忆和长期记忆由 `AgenticRagGraph.load_context()` 统一加载。
 
-和 MVP 目标的差距：
+当前差距：
 
-| 项目 | 当前实际 | MVP 目标 |
+| 项目 | 当前实际 | 后续目标 |
 | --- | --- | --- |
-| 流式入口是否经过 Router | 否 | 是 |
-| 普通聊天是否复用完整 Tool Agent | 是 | 否 |
-| 工具是否分类 | 否 | 是 |
-| 普通聊天可用工具范围 | 默认全部工具 | 只允许 `safe_utility` 和明确 `personal_action` |
-| RAG 是否克制调用 | 依赖 Agent 自己判断 | Router 判断企业知识场景后再调用 |
-| 会话记忆 | 已接入 | 保留并优化 |
+| 流式入口是否经过 Router | 是，经过兼容入口 | 保持兼容并减少重复字段映射 |
+| 普通聊天是否复用完整 Tool Agent | 否，直接回答和工具调用分支分离 | 用真实 decision_chain 提升 action 判断准确率 |
+| 工具是否分类 | 由 `AGENTIC_RAG_TOOLS` 和 `AgenticToolRunner` 控制 | 增加更细风险分类和审计 |
+| RAG 是否克制调用 | 由 `needs_retrieval/action=retrieve` 控制 | 用评测优化误检索/漏检索 |
+| 会话记忆 | 已接入会话摘要、最近历史和长期记忆 | 继续评测长期记忆相关性和安全注入边界 |
 
-### 当前非流式 Router 入口
+### 当前 Router / Agentic RAG 入口
 
-当前 `/api/agent/router/query` 的真实流程是：
+当前 `/api/agent/router/query` 与 `/api/agent/query/stream` 都通过 `RouterGraph` 兼容入口进入 `AgenticRagGraph`：
 
 ```text
-POST /api/agent/router/query
+POST /api/agent/router/query 或 /api/agent/query/stream
   -> get_current_user_id
   -> rate_limit
-  -> router_graph.invoke()
-      -> load_context
-      -> llm_router
-      -> validate_decision
-      -> conditional route
-          rag_query       -> enterprise_rag_service
-          agent_tool_call -> get_agent_response()
-          chat            -> get_agent_response()
-          system          -> 保守提示，不直接执行
-          clarify         -> 追问
-      -> persist_message
-      -> format_response
+  -> router_graph.invoke() / router_graph.stream()
+      -> AgenticRagGraph.invoke()
+          -> load_context: 会话压缩记忆 + 长期记忆
+          -> understand_request: AgenticActionDecision
+          -> safety_check
+          -> action 分支
+              direct_answer -> 直接回答
+              retrieve      -> RagEvidenceWorkflow
+              tool_call     -> AgenticToolRunner
+              clarify       -> 澄清反问
+              refuse        -> 安全拒绝
+          -> finalize_trace
+          -> persist_message: 成功回答写入会话历史
+      -> 兼容 RouterResponse / SSE events
 ```
 
 当前特点：
 
-- 非流式 Router 已经有意图识别。
-- `rag_query` 会进入 `EnterpriseRagService`。
-- `system` 路由不会直接执行危险操作。
-- 但 `chat_node` 和 `agent_node` 都调用同一个 `get_agent_response()`。
-- `get_agent_response()` 默认仍然创建完整 Tool Agent。
+- `RouterGraph` 不再拥有旧多分支 LangGraph，只做兼容包装。
+- `AgenticRagGraph` 是单一主状态机，避免 RouterGraph 与 EnterpriseRagGraph 双重拥有流程。
+- 企业知识问题进入 `RagEvidenceWorkflow`，由 planner、strategy、retrieval、evaluation、retry 和 generation 串联。
+- 工具调用通过 `AgenticToolRunner` 执行受控工具，不再让普通聊天默认持有完整工具池。
+- 澄清和拒绝成为 `action` 分支，而不是旧 route 节点。
 
-和 MVP 目标的差距：
+当前 MVP 差距已经从“路由是否接入”转为“策略质量与可观测性是否足够”：
 
-| 项目 | 当前实际 | MVP 目标 |
+| 项目 | 当前实际 | 后续目标 |
 | --- | --- | --- |
-| Router 是否存在 | 已有 | 保留并简化场景分类 |
-| chat 与 tool_action 是否分离 | 没有，最终都走完整 Agent | 必须分离 |
-| chat 是否可以调用安全工具 | 可以，但没有限制范围 | 只允许安全小工具和明确个人工具 |
-| enterprise_knowledge 是否独立 | 非流式中已独立 | 流式中也要独立 |
-| clarify 是否存在 | 已有简单追问 | 按场景生成更具体追问 |
+| 主入口统一 | 已统一到 RouterGraph 兼容入口 + AgenticRagGraph | 保持旧 API 兼容并减少重复包装 |
+| chat / RAG / tool 边界 | 已用 action 分支表达 | 用真实 decision_chain 替换默认保守决策 |
+| 企业 RAG 独立性 | 已由 RagEvidenceWorkflow 拥有 | 继续完善 debug、评测和前端引用展示 |
+| clarify / refuse | 已有固定分支 | 让澄清问题更具体、拒绝原因更可审计 |
 
 ### 当前默认工具池
 
@@ -398,161 +397,69 @@ FULL_AGENT_TOOLS
 
 第一步先让普通 `chat` 只拿 `CHAT_SAFE_TOOLS`，把 RAG 和重排序从普通聊天默认工具池里拿掉。
 
-## 改造优先级
+## 当前实现状态
+
+更新时间：2026-06-11
 
 ### P0：工具池隔离
 
-目标：
+当前工具边界已经迁移到 `AgenticRagGraph` 的 action 分支：
 
-- `chat_node` 不再调用完整 Tool Agent。
-- 普通聊天最多使用 `CHAT_SAFE_TOOLS`。
-- `agent_tool_call` 才使用更大的工具池。
-
-建议代码改动：
-
-- 在 `agent_tools.py` 定义工具分类列表。
-- 在 `AgentFactory` 支持不同 tool profile。
-- `router_graph.chat_node` 调用 chat 专用链或 chat-safe agent。
-- `router_graph.agent_node` 调用 full/scoped tool agent。
+- 普通直接回答走 `direct_answer`，不默认创建完整 Tool Agent。
+- 工具类请求走 `tool_call`，由 `AgenticToolRunner` 执行 `AGENTIC_RAG_TOOLS` 中的受控工具。
+- 企业知识库问题走 `retrieve`，不通过普通聊天工具池触发检索。
 
 ### P1：Router SSE 化
 
-目标：
-
-- `/api/agent/query/stream` 也先经过 Router。
-- 保持流式体验。
-- chat / enterprise_knowledge / tool_action 不再走同一条链。
-
-### P2：纯聊天链
-
-目标：
-
-- 普通聊天不依赖 Agent scratchpad。
-- 回答风格稳定。
-- 工具只作为可选安全增强，不是默认自由选择。
-
-### P3：企业知识库独立链路
-
-目标：
-
-- 企业知识问题进入 RAG 链路。
-- 普通 chat 不直接看到 `rag_summary_tools`。
-- 后续再把 BM25/Reranker 产品化。
-
-## 实施记录：P0 到 P3 已完成
-
-更新时间：2026-05-14
-
-### P0：工具池隔离
-
-已完成：
-
-- 在 `backend/app/agent/agent_tools.py` 中拆出工具池：
-  - `CHAT_SAFE_TOOLS`
-    - `get_weather_tools`
-    - `what_time_is_now`
-  - `FULL_AGENT_TOOLS`
-    - `rag_summary_tools`
-    - `get_weather_tools`
-    - `what_time_is_now`
-    - `get_user_info_tools`
-    - `reorder_documents_tools`
-- 在 `backend/app/agent/agent.py` 中为 `AgentFactory` 增加 `tool_profile` 支持：
-  - `chat_safe`
-  - `full`
-- 默认完整 Agent 仍保持 `full` 工具池，兼容旧调用。
-- 修复 `what_time_is_now()` 中 `strftime` 字符串引号冲突问题。
-
-效果：
-
-- 普通聊天不再默认拿到 RAG、用户信息、重排序等工具。
-- 需要工具动作的链路才使用完整工具池。
-
-### P1：Router SSE 化
-
-已完成：
-
-- 在 `backend/app/agent/router_graph.py` 中新增 `RouterGraph.stream()`。
-- `/api/agent/query/stream` 已从直连 `get_agent_stream_response()` 改为先走 `router_graph.stream()`。
-- 流式响应会先输出 `type=route` 事件，再按路由进入对应链路。
-
-当前流式主入口：
+当前流式入口：
 
 ```text
 POST /api/agent/query/stream
   -> get_current_user_id
   -> rate_limit
   -> router_graph.stream()
-      -> load_context
-      -> llm_router
-      -> validate_decision
-      -> route event
-      -> chat / enterprise_knowledge / tool_action / clarify / unsafe_or_system
+      -> AgenticRagGraph.invoke()
+      -> 兼容 route 事件: route = agentic_rag
+      -> RagState.sse_events
+      -> response
+      -> done
 ```
 
-效果：
+`RouterGraph.stream()` 不再手动串联旧 `load_context -> router -> validate -> branch`，而是统一委托 `AgenticRagGraph.invoke()` 后包装 SSE。
 
-- 流式入口也开始走 Router。
-- `chat`、企业知识、工具动作、危险系统请求不再混在同一条默认 Agent 链路里。
+### P2：直接回答 / 工具 / RAG 边界
 
-### P2：纯聊天链
+当前边界：
 
-已完成：
+| action | 执行链路 |
+| --- | --- |
+| `direct_answer` | `direct_answer_node` 生成不检索企业库的直接回答 |
+| `retrieve` | `RagEvidenceWorkflow` 生成有证据回答或证据不足响应 |
+| `tool_call` | `AgenticToolRunner` 执行受控工具 |
+| `clarify` | `clarify_node` 返回澄清问题 |
+| `refuse` | `refuse_node` 返回安全拒绝 |
 
-- 在 `backend/app/agent/agent.py` 中新增 `PURE_CHAT_SYSTEM_PROMPT`。
-- 新增不带 `agent_scratchpad` 的纯聊天链：
-  - `AgentFactory.create_chat_chain()`
-  - `get_chat_response()`
-  - `get_chat_stream_response()`
-- Router 的 `chat_node` 和流式 `chat` 分支已切到纯聊天链。
-- 天气、当前时间作为显式 safe utility 增强：
-  - 明确问天气时，代码显式调用 `get_weather_tools`。
-  - 明确问当前时间/日期时，代码显式调用 `what_time_is_now`。
-  - 工具结果作为上下文注入纯聊天链，而不是交给 Tool Agent 自由选择。
+### P3：企业知识链路独立
 
-效果：
+当前企业知识链路由 `RagEvidenceWorkflow` 拥有：
 
-- 普通解释、写作、总结、改写、上下文聊天不再依赖 AgentExecutor。
-- 普通 chat 不再使用旧的“优先 RAG”主提示词。
-- safe utility 保留，但调用边界更清晰。
+```text
+planner
+  -> strategy_select
+  -> retrieve / retrieve_decomposed
+  -> evaluate_context
+  -> decide_next_action
+  -> rewrite_query / expand_top_k retry
+  -> external search fallback
+  -> generate_answer 或 build_insufficient_evidence
+  -> finalize_trace
+```
 
-### P3：路由命名统一与企业知识链路独立
+`EnterpriseRagGraph` 只保留兼容包装，内部委托 `RagEvidenceWorkflow`。
 
-已完成：
+### 当前后续重点
 
-- Router route 统一为 MVP 文档中的五类：
-  - `chat`
-  - `enterprise_knowledge`
-  - `tool_action`
-  - `clarify`
-  - `unsafe_or_system`
-- 旧 route 名称保留兼容映射：
-  - `rag_query` -> `enterprise_knowledge`
-  - `agent_tool_call` -> `tool_action`
-  - `system` -> `unsafe_or_system`
-- LangGraph 节点命名同步：
-  - `enterprise_knowledge_node`
-  - `tool_action_node`
-  - `unsafe_or_system_node`
-- `enterprise_knowledge_node` 继续独立调用 `EnterpriseRagService`。
-- `tool_action_node` 继续走完整工具 Agent。
-- `unsafe_or_system_node` 只返回保守提示，不直接执行危险操作。
-
-效果：
-
-- 对外返回和内部路由都使用 MVP 统一命名。
-- 企业知识问题进入独立 RAG 链路。
-- 普通 chat 不直接看到 `rag_summary_tools`。
-- 危险系统请求不会直接执行。
-
-### 已验证
-
-- `py_compile` 通过。
-- Router、流式入口、纯聊天链导入通过。
-- SSE 烟测通过：
-  - `route -> response -> done`
-- safe utility 显式上下文测试通过。
-- 旧 route 名称兼容测试通过：
-  - `rag_query` 输出为 `enterprise_knowledge`
-  - `agent_tool_call` 输出为 `tool_action`
-  - `system` 输出为 `unsafe_or_system`
+- 接入更可靠的 `decision_chain`，让 `AgenticActionDecision` 不依赖默认状态。
+- 稳定 SSE 事件协议，减少前端对兼容 `response` 事件的依赖。
+- 继续用评测数据调参 `StrategyRouter`。
+- 完善证据不足、web fallback 和 debug trace 的可视化。

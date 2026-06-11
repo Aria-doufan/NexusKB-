@@ -21,29 +21,39 @@ Agent 不应该自由决定所有动作，而应该输出受控枚举和可验�
 
 ## 3. 在线主链路
 
-推荐最终在线链路：
+当前在线链路已经收敛为 `RouterGraph` 兼容入口 + `AgenticRagGraph` 主状态机 + `RagEvidenceWorkflow` 证据工作流：
 
 ```text
 用户问题
   -> FastAPI /api/agent/query/stream
   -> Auth / RateLimit / RequestId
-  -> RouterGraph.load_context
-  -> RouterGraph.classify_query
-  -> RouterGraph.select_strategy
-  -> Query Rewrite / HyDE / Decompose，可选
-  -> EnterpriseRagService.retrieve
-       -> Dense Retrieval
-       -> BM25 Retrieval
-       -> Metadata Filter / Source Boost
-       -> RRF Fusion
-  -> Reranker，可选
-  -> Parent Chunk Expansion
-  -> Context Compression
-  -> Citation Selection
-  -> LLM Answer Generation
+  -> RouterGraph.invoke / stream 兼容包装
+  -> AgenticRagGraph.load_context
+       -> conversation memory recent window + rolling summary
+       -> long_term_memory_service.search
+  -> AgenticRagGraph StateGraph
+       -> initialize
+       -> understand_request: action / rag_intent / source_hints / confidence
+       -> safety_check: direct_answer / retrieve / tool_call / clarify / refuse
+       -> retrieve: 委托 RagEvidenceWorkflow
+  -> RagEvidenceWorkflow
+       -> planner
+       -> strategy_select
+       -> RetrievalPipeline.run
+            -> EnterpriseRagService.retrieve_with_details
+            -> Dense Retrieval
+            -> BM25 Retrieval
+            -> Source Boost
+            -> RRF Fusion
+            -> Reranker，可选
+       -> evaluate_context
+       -> rewrite_query / expand_top_k retry，可选
+       -> decompose for multi_hop / comparison，可选
+       -> external search fallback，可选
+       -> LLM Answer Generation 或 insufficient evidence
+  -> RagResponse(answer, sources, strategy, evaluation, metrics, debug_id)
   -> SSE Events
-  -> RagResponse(answer, sources, strategy, metrics, debug_id)
-  -> Save Session / Audit Event
+  -> Save Session / Debug Trace
 ```
 
 ## 4. 核心模块边界
@@ -51,9 +61,12 @@ Agent 不应该自由决定所有动作，而应该输出受控枚举和可验�
 | 模块 | 职责 | 当前状态 | 可能文件 |
 | --- | --- | --- | --- |
 | API Router | 对外暴露查询、调试、会话、向量接口 | 已完成 / 部分完成 | `backend/app/router/chat.py` |
-| RouterGraph | route 分类、RAG intent 判断、策略选择 | 已完成 / 待扩展 | `backend/app/agent/router_graph.py` |
-| EnterpriseRagService | 企业 RAG 主编排 | 已完成 / 待 schema 化 | `backend/app/rag/enterprise_rag_service.py` |
-| Retriever | dense、BM25、metadata、RRF | 已完成 / 待统一响应 | `backend/app/rag/*retriev*.py` |
+| RouterGraph | 旧 API 兼容入口，负责 invoke/stream 字段映射和 SSE 包装 | 已完成 | `backend/app/agent/router_graph.py` |
+| AgenticRagGraph | 单一 LangGraph 主状态机，负责 action 路由、记忆加载、工具/检索/澄清/拒绝分支 | 已完成 / 持续优化 | `backend/app/rag/agentic_rag_graph.py` |
+| RagEvidenceWorkflow | 企业 RAG 证据主编排，负责 planner、strategy、retrieval、evaluation、retry、fallback、generation、trace | 已完成 / 持续优化 | `backend/app/rag/rag_evidence_workflow.py` |
+| EnterpriseRagGraph | 兼容包装器，内部委托 RagEvidenceWorkflow | 已完成 | `backend/app/rag/enterprise_rag_graph.py` |
+| EnterpriseRagService | 企业 RAG 底层检索服务 | 已完成 | `backend/app/rag/enterprise_rag_service.py` |
+| Retriever | dense、BM25、metadata、RRF、reranker 结果归一化 | 已完成 | `backend/app/rag/retrieval_pipeline.py` |
 | Reranker | Qwen3 reranker 封装 | 已完成 | `backend/app/rag/reorder_service.py` 或等价模块 |
 | Context Builder | parent 回填、去重、压缩、引用选择 | 部分完成 / 待实现 | `backend/app/rag/context_builder.py` |
 | Response Schema | Pydantic 响应模型 | 待实现 | `backend/app/schemas/rag.py` |
@@ -438,4 +451,4 @@ RagMetrics.rewrite_ms: 包含 rewrite + decompose 耗时；debug 接口可拆成
 
 ## 10. 实施顺序建议
 
-第一步先实现 `RagResponse` 和 `RagSource`，让所有 RAG 响应都能带 `sources`、`strategy`、`metrics`。第二步标准化 SSE `done` 事件，保证前端能拿到完整最终响应。第三步新增 `/api/rag/debug`，把 retrieved、fused、reranked、selected_context 全部暴露出来。第四步再把策略矩阵接入 RouterGraph。第五步才扩展 HyDE、decompose、二次检索和 contextual chunk。
+当前已落地 `RagResponse`、`RagSource`、`RagStrategySummary`、`RagMetrics`、`AgenticRagGraph`、`RagEvidenceWorkflow`、策略矩阵、decompose 检索和 debug trace。下一步实施顺序建议调整为：第一步稳定 SSE 事件协议和前端展示；第二步完善 `/api/rag/debug` 的检索、融合、重排、证据评估可视化；第三步基于评测报告调参 strategy matrix；第四步完善外部搜索 fallback 和证据不足策略；第五步再评估 HyDE、contextual chunk 或更复杂的上下文压缩是否值得引入。
