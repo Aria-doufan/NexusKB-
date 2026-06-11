@@ -99,7 +99,7 @@ def test_enterprise_rag_graph_supports_agentic_intent_taxonomy():
 
 @pytest.mark.anyio
 async def test_enterprise_rag_graph_decomposes_comparison_queries(monkeypatch):
-    from app.rag import enterprise_rag_graph
+    from app.rag import rag_evidence_workflow
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph
     from app.rag.decomposition import SubQuery, SubQueryPlan
     from app.schemas.rag import RagState
@@ -113,7 +113,7 @@ async def test_enterprise_rag_graph_decomposes_comparison_queries(monkeypatch):
             ],
         )
 
-    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    monkeypatch.setattr(rag_evidence_workflow, "decompose_query", fake_decompose_query)
     service = QueryAwareEnterpriseRagService(
         {
             "trial leave process": [
@@ -172,7 +172,7 @@ async def test_enterprise_rag_graph_decomposes_comparison_queries(monkeypatch):
 
 @pytest.mark.anyio
 async def test_enterprise_rag_graph_clears_stale_sub_queries_when_decomposition_falls_back(monkeypatch):
-    from app.rag import enterprise_rag_graph
+    from app.rag import rag_evidence_workflow
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph
     from app.rag.decomposition import build_fallback_plan
     from app.schemas.rag import RagState, SubQuery as RagSubQuery
@@ -180,7 +180,7 @@ async def test_enterprise_rag_graph_clears_stale_sub_queries_when_decomposition_
     async def fake_decompose_query(query, history_context=""):
         return build_fallback_plan(query, "invalid_json")
 
-    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    monkeypatch.setattr(rag_evidence_workflow, "decompose_query", fake_decompose_query)
     service = QueryAwareEnterpriseRagService(
         {
             "Compare trial and full-time leave process": [
@@ -218,7 +218,7 @@ async def test_enterprise_rag_graph_clears_stale_sub_queries_when_decomposition_
 
 @pytest.mark.anyio
 async def test_enterprise_rag_graph_requires_decomposed_query_coverage(monkeypatch):
-    from app.rag import enterprise_rag_graph
+    from app.rag import rag_evidence_workflow
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph
     from app.rag.decomposition import SubQuery, SubQueryPlan
     from app.schemas.rag import RagState
@@ -232,7 +232,7 @@ async def test_enterprise_rag_graph_requires_decomposed_query_coverage(monkeypat
             ],
         )
 
-    monkeypatch.setattr(enterprise_rag_graph, "decompose_query", fake_decompose_query)
+    monkeypatch.setattr(rag_evidence_workflow, "decompose_query", fake_decompose_query)
     service = QueryAwareEnterpriseRagService(
         {
             "trial leave process": [
@@ -365,35 +365,33 @@ async def test_enterprise_rag_graph_returns_insufficient_evidence_without_genera
 
 
 @pytest.mark.anyio
-async def test_enterprise_rag_graph_run_delegates_to_compiled_langgraph_workflow():
+async def test_enterprise_rag_graph_run_delegates_to_evidence_workflow():
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph
     from app.schemas.rag import EvaluationSummary, RagMetrics, RagResponse, RagState, RagStrategySummary
 
-    class FakeCompiledGraph:
+    class FakeWorkflow:
         def __init__(self):
             self.received_state = None
 
-        async def ainvoke(self, graph_state):
-            self.received_state = graph_state
-            return {
-                "response": RagResponse(
-                    request_id=graph_state["rag_state"].request_id,
-                    debug_id=graph_state["rag_state"].debug_id,
-                    session_id=graph_state["rag_state"].session_id,
-                    answer="graph answer",
-                    sources=[],
-                    strategy=RagStrategySummary(strategy_name="default", retrieval_mode="hybrid", final_top_k=5),
-                    evaluation=EvaluationSummary(enough_evidence=True),
-                    metrics=RagMetrics(),
-                )
-            }
+        async def run(self, state):
+            self.received_state = state
+            return RagResponse(
+                request_id=state.request_id,
+                debug_id=state.debug_id,
+                session_id=state.session_id,
+                answer="workflow answer",
+                sources=[],
+                strategy=RagStrategySummary(strategy_name="default", retrieval_mode="hybrid", final_top_k=5),
+                evaluation=EvaluationSummary(enough_evidence=True),
+                metrics=RagMetrics(),
+            )
 
-    compiled_graph = FakeCompiledGraph()
+    workflow = FakeWorkflow()
     graph = object.__new__(EnterpriseRagGraph)
-    graph.graph = compiled_graph
+    graph.workflow = workflow
     state = RagState(
-        request_id="req-graph-delegate",
-        debug_id="dbg-graph-delegate",
+        request_id="req-workflow-delegate",
+        debug_id="dbg-workflow-delegate",
         user_id="user-1",
         original_query="Where is PTO?",
         current_query="Where is PTO?",
@@ -401,8 +399,8 @@ async def test_enterprise_rag_graph_run_delegates_to_compiled_langgraph_workflow
 
     response = await graph.run(state)
 
-    assert response.answer == "graph answer"
-    assert compiled_graph.received_state["rag_state"] is state
+    assert response.answer == "workflow answer"
+    assert workflow.received_state is state
 
 
 def test_enterprise_rag_service_formats_dict_documents_for_answer_context():
@@ -700,3 +698,12 @@ def test_rag_evidence_workflow_is_plain_python_workflow():
     workflow = RagEvidenceWorkflow(service=object(), trace_store=object())
 
     assert not hasattr(workflow, "graph")
+
+
+def test_enterprise_rag_graph_no_longer_builds_langgraph():
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+
+    graph = EnterpriseRagGraph(service=object(), trace_store=object())
+
+    assert not hasattr(graph, "graph")
+    assert hasattr(graph, "workflow")
