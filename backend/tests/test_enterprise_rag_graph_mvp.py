@@ -650,6 +650,50 @@ async def test_internal_evidence_generation_does_not_receive_web_context():
     assert response.sources[0].title == "报销制度"
 
 
+@pytest.mark.anyio
+async def test_rag_evidence_workflow_run_generates_answer_and_saves_trace_for_strong_evidence():
+    from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
+    from app.schemas.rag import RagState
+
+    service = FakeEnterpriseRagService(
+        documents=[
+            {
+                "parent_doc_id": "parent-1",
+                "parent_chunk_id": "chunk-1",
+                "source_type": "confluence",
+                "title": "PTO Policy",
+                "section_heading": "Annual leave",
+                "score": 0.9,
+                "parent_text": "Employees can find PTO rules in the HR page.",
+                "child_text": "PTO rules",
+                "metadata": {"source_type": "confluence"},
+            }
+        ]
+    )
+    trace_store = CapturingTraceStore()
+    workflow = RagEvidenceWorkflow(service=service, trace_store=trace_store)
+    state = RagState(
+        request_id="req-workflow-strong-evidence",
+        debug_id="dbg-workflow-strong-evidence",
+        session_id="sess-workflow-strong-evidence",
+        user_id="user-1",
+        original_query="Where is the PTO policy?",
+        current_query="Where is the PTO policy?",
+        rag_intent="constrained",
+        source_hints=["confluence"],
+        router_confidence=0.91,
+    )
+
+    response = await workflow.run(state)
+
+    assert response.answer == "answer for Where is the PTO policy? using 1 docs"
+    assert {source.title for source in response.sources} == {"PTO Policy"}
+    assert {source.source_type for source in response.sources} == {"confluence"}
+    assert trace_store.saved
+    assert trace_store.saved[0].retrieval_attempts[0].attempt.selected_documents[0].title == "PTO Policy"
+    assert len(state.retrieval_attempts) >= 1
+
+
 def test_rag_evidence_workflow_is_plain_python_workflow():
     from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
 
