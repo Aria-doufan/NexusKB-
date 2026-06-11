@@ -551,3 +551,20 @@ async def test_agentic_rag_graph_invoke_loads_context_and_persists_messages(monk
             "assistant_message": "这是一个通用问题，可以不检索企业知识库直接回答：What is LangGraph?",
         }
     ]
+
+
+def test_only_agentic_rag_graph_owns_compiled_langgraph_for_agent_path():
+    from app.agent.router_graph import RouterGraph
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+    from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
+
+    router = object.__new__(RouterGraph)
+    agentic_graph = AgenticRagGraph()
+    enterprise_wrapper = EnterpriseRagGraph()
+    evidence_workflow = RagEvidenceWorkflow()
+
+    assert hasattr(agentic_graph, "graph")
+    assert not hasattr(router, "graph")
+    assert not hasattr(enterprise_wrapper, "graph")
+    assert not hasattr(evidence_workflow, "graph")
