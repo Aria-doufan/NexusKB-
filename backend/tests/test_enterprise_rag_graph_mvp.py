@@ -648,3 +648,11 @@ async def test_internal_evidence_generation_does_not_receive_web_context():
     assert service.generated_web_results == []
     assert service.generated_evidence_mode == "internal_only"
     assert response.sources[0].title == "报销制度"
+
+
+def test_rag_evidence_workflow_is_plain_python_workflow():
+    from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
+
+    workflow = RagEvidenceWorkflow(service=object(), trace_store=object())
+
+    assert not hasattr(workflow, "graph")
