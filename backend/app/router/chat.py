@@ -36,7 +36,7 @@ async def query_stream(
     # 如果没有提供session_id，自动生成一个
     session_id = request.session_id or str(uuid.uuid4())
     
-    # 先经过 Router，再按场景进入 chat / enterprise_knowledge / tool_action / clarify / unsafe_or_system 分支
+    # 所有请求进入单一 Agentic RAG 图，由图内节点决定直接回答、检索、工具调用、澄清或拒答。
     return StreamingResponse(
         router_graph.stream(request.query, user_id, session_id),
         media_type="text/event-stream",

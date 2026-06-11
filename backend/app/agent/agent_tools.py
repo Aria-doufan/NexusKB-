@@ -68,6 +68,12 @@ CHAT_SAFE_TOOLS: List[BaseTool] = [
     what_time_is_now,
 ]
 
+AGENTIC_RAG_TOOLS: List[BaseTool] = [
+    get_weather_tools,
+    what_time_is_now,
+    get_user_info_tools,
+]
+
 FULL_AGENT_TOOLS: List[BaseTool] = [
     rag_summary_tools,
     get_weather_tools,

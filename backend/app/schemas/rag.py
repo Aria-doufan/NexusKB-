@@ -234,6 +234,33 @@ class RagResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ToolExecutionResult(BaseModel):
+    tool_name: str = Field(min_length=1)
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    output: str = ""
+    success: bool = True
+    error: str | None = None
+
+
+class AgenticActionDecision(BaseModel):
+    intent: str = "unknown"
+    action: Literal[
+        "direct_answer",
+        "retrieve",
+        "tool_call",
+        "clarify",
+        "refuse",
+    ] = "retrieve"
+    needs_retrieval: bool = True
+    needs_tool: bool = False
+    needs_clarification: bool = False
+    safety_risk: bool = False
+    source_hints: list[str] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+
 class RagState(BaseModel):
     request_id: str = Field(min_length=1)
     debug_id: str = Field(min_length=1)
@@ -248,6 +275,26 @@ class RagState(BaseModel):
     source_hints: list[str] = Field(default_factory=list)
     router_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     router_reason: str = ""
+    history: list[tuple[str, str]] = Field(default_factory=list)
+    memory_summary: str = ""
+    memory_compressed_turns: int = Field(default=0, ge=0)
+    memory_total_turns: int = Field(default=0, ge=0)
+    long_term_memories: list[dict[str, Any]] = Field(default_factory=list)
+    intent: str = "unknown"
+    action: Literal[
+        "direct_answer",
+        "retrieve",
+        "tool_call",
+        "clarify",
+        "refuse",
+    ] = "retrieve"
+    needs_retrieval: bool = True
+    needs_tool: bool = False
+    needs_clarification: bool = False
+    safety_risk: bool = False
+    required_tools: list[str] = Field(default_factory=list)
+    tool_results: list[ToolExecutionResult] = Field(default_factory=list)
+    response_type: Literal["answer", "clarification", "refusal", "tool_answer"] = "answer"
     plan: RagPlan | None = None
     memory_context: RagMemoryContext | None = None
     strategy: RagStrategyConfig | None = None

@@ -35,7 +35,7 @@ class AgentResponse(BaseModel):
 
 
 class RouterResponse(BaseModel):
-    """Router Graph响应模型"""
+    """Agentic RAG兼容响应模型"""
     session_id: str
     route: str
     request_id: Optional[str] = None
