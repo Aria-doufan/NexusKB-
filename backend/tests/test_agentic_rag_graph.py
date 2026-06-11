@@ -50,6 +50,25 @@ def test_agentic_rag_state_defaults_support_single_graph_actions():
     assert tool_result.success is True
 
 
+def test_agentic_rag_graph_is_not_enterprise_rag_graph_subclass():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+
+    assert not issubclass(AgenticRagGraph, EnterpriseRagGraph)
+
+
+def test_agentic_rag_graph_accepts_rag_workflow_dependency():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+
+    class StubRagWorkflow:
+        pass
+
+    workflow = StubRagWorkflow()
+    graph = AgenticRagGraph(rag_workflow=workflow)
+
+    assert graph.rag_workflow is workflow
+
+
 class StubTraceStore:
     def __init__(self):
         self.saved = []
