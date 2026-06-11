@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agent.agent_tools import AGENTIC_RAG_TOOLS
 from app.core.logger_handler import logger
-from app.rag.enterprise_rag_graph import EnterpriseRagGraph
+from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
 from app.schemas.rag import (
     AgenticActionDecision,
     MemoryItem,
@@ -70,9 +70,16 @@ class AgenticToolRunner:
         return results
 
 
-class AgenticRagGraph(EnterpriseRagGraph):
-    def __init__(self, service=None, trace_store=None, decision_chain=None, tool_runner=None):
-        super().__init__(service=service, trace_store=trace_store)
+class AgenticRagGraph:
+    def __init__(
+        self,
+        service=None,
+        trace_store=None,
+        decision_chain=None,
+        tool_runner=None,
+        rag_workflow=None,
+    ):
+        self.rag_workflow = rag_workflow or RagEvidenceWorkflow(service=service, trace_store=trace_store)
         self.decision_chain = decision_chain
         self.tool_runner = tool_runner or AgenticToolRunner()
         self.graph = self._build_graph()
@@ -247,8 +254,8 @@ class AgenticRagGraph(EnterpriseRagGraph):
 
     async def run(self, state: RagState):
         started = perf_counter()
-        started_at = self._now()
-        trace = self.initialize_trace(state, started_at)
+        started_at = self.rag_workflow._now()
+        trace = self.rag_workflow.initialize_trace(state, started_at)
         trace_token = _active_trace_var.set(trace)
         try:
             result = await self.graph.ainvoke(state)
@@ -259,14 +266,14 @@ class AgenticRagGraph(EnterpriseRagGraph):
             elif isinstance(result, RagState) and result is not state:
                 for field_name in RagState.model_fields:
                     setattr(state, field_name, getattr(result, field_name))
-            response = await self.finalize_trace(state, trace, started, started_at)
+            response = await self.rag_workflow.finalize_trace(state, trace, started, started_at)
             object.__setattr__(response.strategy, "query_type", state.rag_intent)
             return response
         finally:
             _active_trace_var.reset(trace_token)
 
     def initialize_node(self, state: RagState) -> RagState:
-        self._record_event(state, "agentic_graph_initialized", "initialize")
+        self.rag_workflow._record_event(state, "agentic_graph_initialized", "initialize")
         return state
 
     async def understand_request_node(self, state: RagState) -> RagState:
@@ -305,7 +312,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
         state.router_confidence = decision.confidence
         state.router_reason = decision.reason
         self._update_trace_route_decision(state)
-        self._record_event(
+        self.rag_workflow._record_event(
             state,
             "agentic_action_decided",
             "understand_request",
@@ -323,28 +330,28 @@ class AgenticRagGraph(EnterpriseRagGraph):
         elif state.action not in {"direct_answer", "tool_call", "refuse", "clarify", "retrieve"}:
             state.action = "retrieve"
 
-        self._record_event(state, "agentic_action_routed", "safety_check", data={"action": state.action})
+        self.rag_workflow._record_event(state, "agentic_action_routed", "safety_check", data={"action": state.action})
         return state
 
     def direct_answer_node(self, state: RagState) -> RagState:
         state.response_type = "answer"
         state.answer = f"这是一个通用问题，可以不检索企业知识库直接回答：{state.original_query}"
         state.sources = []
-        self._record_event(state, "direct_answer_created", "direct_answer")
+        self.rag_workflow._record_event(state, "direct_answer_created", "direct_answer")
         return state
 
     def clarify_node(self, state: RagState) -> RagState:
         state.response_type = "clarification"
         state.answer = f"需要再确认一下您的问题：{state.original_query}。请补充目标、范围或上下文。"
         state.sources = []
-        self._record_event(state, "clarification_created", "clarify")
+        self.rag_workflow._record_event(state, "clarification_created", "clarify")
         return state
 
     def refuse_node(self, state: RagState) -> RagState:
         state.response_type = "refusal"
         state.answer = "不能执行该请求，因为它可能带来安全或破坏性风险。"
         state.sources = []
-        self._record_event(state, "refusal_created", "refuse")
+        self.rag_workflow._record_event(state, "refusal_created", "refuse")
         return state
 
     async def tool_call_node(self, state: RagState) -> RagState:
@@ -354,7 +361,7 @@ class AgenticRagGraph(EnterpriseRagGraph):
         state.response_type = "tool_answer"
         state.answer = "\n".join(successful_outputs) if successful_outputs else "工具调用没有返回可用结果。"
         state.sources = []
-        self._record_event(
+        self.rag_workflow._record_event(
             state,
             "tool_call_finished",
             "tool_call",
@@ -365,43 +372,43 @@ class AgenticRagGraph(EnterpriseRagGraph):
     async def retrieve_node(self, state: RagState) -> RagState:
         trace = self._require_trace()
         if state.plan is None:
-            self.planner(state, trace)
+            self.rag_workflow.planner(state, trace)
         if state.strategy is None:
-            self.strategy_select(state, trace)
+            self.rag_workflow.strategy_select(state, trace)
         reason = "Initial hybrid retrieval."
         if state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count > 0:
             reason = f"Retry after {state.next_action}."
-        await super().retrieve(state, trace, reason)
+        await self.rag_workflow.retrieve(state, trace, reason)
         return state
 
     def evaluate_context_node(self, state: RagState) -> RagState:
-        self.evaluate_context(state, self._require_trace())
+        self.rag_workflow.evaluate_context(state, self._require_trace())
         return state
 
     def decide_next_action_node(self, state: RagState) -> RagState:
-        self.decide_next_action(state)
+        self.rag_workflow.decide_next_action(state)
         return state
 
     def apply_retry_node(self, state: RagState) -> RagState:
         if state.next_action == "rewrite_query":
-            self.rewrite_query(state)
+            self.rag_workflow.rewrite_query(state)
         elif state.next_action == "expand_top_k":
-            self.expand_top_k(state)
+            self.rag_workflow.expand_top_k(state)
         return state
 
     def external_search_node(self, state: RagState) -> RagState:
-        self._record_event(state, "external_search_skipped", "external_search")
+        self.rag_workflow._record_event(state, "external_search_skipped", "external_search")
         return state
 
     async def generate_answer_node(self, state: RagState) -> RagState:
         if state.next_action == "generate":
-            await self.generate_answer(state, self._require_trace())
+            await self.rag_workflow.generate_answer(state, self._require_trace())
         else:
-            self.build_insufficient_evidence(state)
+            self.rag_workflow.build_insufficient_evidence(state)
         return state
 
     def finalize_trace_node(self, state: RagState) -> RagState:
-        self._record_event(state, "agentic_graph_finished", "finalize_trace")
+        self.rag_workflow._record_event(state, "agentic_graph_finished", "finalize_trace")
         return state
 
     def route_after_safety_check(self, state: RagState) -> str:
