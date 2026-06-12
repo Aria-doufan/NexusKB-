@@ -56,3 +56,36 @@ def test_chroma_backend_delegates_to_enterprise_service():
             "use_reranker": False,
         }
     ]
+
+
+def test_factory_defaults_to_chroma_backend(monkeypatch):
+    monkeypatch.delenv("NEXUSKB_RETRIEVAL_BACKEND", raising=False)
+
+    from app.rag.retrieval_backends.chroma_enterprise import ChromaEnterpriseRetrievalBackend
+    from app.rag.retrieval_backends.factory import build_enterprise_retrieval_backend
+
+    backend = build_enterprise_retrieval_backend(service=FakeEnterpriseService())
+
+    assert isinstance(backend, ChromaEnterpriseRetrievalBackend)
+
+
+def test_factory_rejects_unknown_backend(monkeypatch):
+    monkeypatch.setenv("NEXUSKB_RETRIEVAL_BACKEND", "unknown")
+
+    from app.rag.retrieval_backends.factory import build_enterprise_retrieval_backend
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported enterprise retrieval backend"):
+        build_enterprise_retrieval_backend(service=FakeEnterpriseService())
+
+
+def test_rag_evidence_workflow_default_pipeline_uses_backend_factory(monkeypatch):
+    from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
+    from app.rag.retrieval_pipeline import RetrievalPipeline
+
+    service = FakeEnterpriseService()
+    workflow = RagEvidenceWorkflow(service=service)
+
+    assert isinstance(workflow.retrieval_pipeline, RetrievalPipeline)
+    assert hasattr(workflow.retrieval_pipeline.service, "retrieve_with_details")

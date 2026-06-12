@@ -1,3 +1,10 @@
 chat_model_name: qwen3-max
 text_embedding_model_name: qwen3-embedding:latest
 reranker_model_name: qwen3.5:0.8b
+retrieval_backend: chroma
+
+elasticsearch:
+  url: http://localhost:9200
+  index_name: nexuskb_enterprise_chunks
+  username:
+  password:
