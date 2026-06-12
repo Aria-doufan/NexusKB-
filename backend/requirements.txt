@@ -35,3 +35,4 @@ unstructured[all-docs]>=0.22.20
 ragas>=0.3.0
 datasets>=3.0.0
 openai>=1.0.0
+elasticsearch>=8.19.0,<9.0.0

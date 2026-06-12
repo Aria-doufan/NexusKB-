@@ -82,6 +82,8 @@ Agent 不应该自由决定所有动作，而应该输出受控枚举和可验�
 | experimental | `backend/app/rag/graph_index_service.py` | Graph RAG indexing experiment。 |
 | experimental | `backend/scripts/index_enterprise_graph.py` | Offline graph index script。 |
 
+`backend/app/rag/retrieval_backends/*` contains enterprise retrieval backend abstraction; Chroma remains default while Elasticsearch is evaluation-ready candidate.
+
 上传文档应被理解为统一 evidence layer 方向下的补充知识来源，而不是与 Agentic RAG 并行竞争的另一条产品线。当前状态下 `RagService` 是上传文档检索后端 / 候选补充来源，目标方向是作为 source-specific backend 接入统一 source-aware evidence retrieval；除非后续代码接线完成，不应表述为已进入在线主证据链路。
 
 ## 5. Pydantic Response Schema

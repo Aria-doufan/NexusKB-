@@ -43,9 +43,11 @@ class RagEvidenceWorkflow:
 
             strategy_router = default_strategy_router
         if retrieval_pipeline is None:
+            from app.rag.retrieval_backends.factory import build_enterprise_retrieval_backend
             from app.rag.retrieval_pipeline import RetrievalPipeline
 
-            retrieval_pipeline = RetrievalPipeline(service)
+            retrieval_backend = build_enterprise_retrieval_backend(service=service)
+            retrieval_pipeline = RetrievalPipeline(retrieval_backend)
         if web_search_service is None:
             from app.rag.web_search import web_search_service as default_web_search_service
 
