@@ -153,6 +153,42 @@ conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profile
 
 Outputs are written under `backend/data/chunking_eval_outputs/stage1/`, including one `run_record.json` per profile and a stage-level `report.md`. The record format includes `source_type` so future uploaded-document RAG evaluation can reuse the same schema after its query set and expected evidence labels exist.
 
+## Elasticsearch Enterprise Retrieval Backend
+
+NexusKB can evaluate Elasticsearch as an enterprise retrieval backend while keeping Chroma as the default baseline.
+
+Start local Elasticsearch:
+
+```powershell
+docker compose -f docker-compose.elasticsearch.yml up -d
+```
+
+Smoke-test Elasticsearch indexing with a small sample:
+
+```powershell
+conda run -n NexusKB python backend/scripts/index_enterprise_chunks_elasticsearch.py --reset --limit 100
+```
+
+For comparable backend evaluation, index the full enterprise chunk set first:
+
+```powershell
+conda run -n NexusKB python backend/scripts/index_enterprise_chunks_elasticsearch.py --reset
+```
+
+Run Chroma baseline evaluation with the same retrieval method:
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --method chroma_bm25_rrf --limit 20
+```
+
+Run Elasticsearch evaluation:
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --backend elasticsearch --method chroma_bm25_rrf --limit 20
+```
+
+Compare `recall@10`, `evidence_coverage@10`, `hit@5`, `mrr@20`, `ndcg@10`, and `average_latency_ms` before changing the default backend. Keep reranker comparisons separate until Elasticsearch evaluation supports `--backend elasticsearch` with reranking.
+
 ## 5. 检索指标公式
 
 ### 5.1 Hit@K
