@@ -98,9 +98,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    args = parse_args()
+
     from elasticsearch import Elasticsearch, helpers
 
-    args = parse_args()
     parents = load_parent_chunks(args.parent_chunks_path.resolve())
     embeddings = OllamaEmbeddings(model=args.embedding_model, base_url=args.ollama_base_url)
     client = Elasticsearch(args.url)
