@@ -1305,7 +1305,12 @@ def main() -> None:
         from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
         from app.rag.retrieval_backends.factory import load_rag_config
 
-        retrieval_backend = ElasticsearchEnterpriseRetrievalBackend.from_config(load_rag_config())
+        rag_config = load_rag_config()
+        rag_config["text_embedding_model_name"] = args.embedding_model
+        rag_config.setdefault("elasticsearch", {})["ollama_base_url"] = args.ollama_base_url
+        retrieval_backend = ElasticsearchEnterpriseRetrievalBackend.from_config(rag_config)
+        retrieval_backend.rrf_k = args.rrf_k
+        retrieval_backend.source_hint_soft_boost = args.source_boost
 
     bm25 = None
     if args.backend == "chroma" and method_needs_bm25(normalized_method):

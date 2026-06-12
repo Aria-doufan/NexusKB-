@@ -13,10 +13,19 @@ from app.rag.reorder_service import reorder_service
 
 
 class ElasticsearchEnterpriseRetrievalBackend:
-    def __init__(self, client: Any, embeddings: Any, index_name: str):
+    def __init__(
+        self,
+        client: Any,
+        embeddings: Any,
+        index_name: str,
+        rrf_k: int = RRF_K,
+        source_hint_soft_boost: float = SOURCE_HINT_SOFT_BOOST,
+    ):
         self.client = client
         self.embeddings = embeddings
         self.index_name = index_name
+        self.rrf_k = rrf_k
+        self.source_hint_soft_boost = source_hint_soft_boost
 
     @classmethod
     def from_config(cls, config: dict[str, Any]):
@@ -70,6 +79,8 @@ class ElasticsearchEnterpriseRetrievalBackend:
             ],
             source_hints=source_hints,
             candidates=candidates,
+            rrf_k=self.rrf_k,
+            source_hint_soft_boost=self.source_hint_soft_boost,
         )
         fused_documents = [
             replace(candidates[parent_chunk_id], score=score)
@@ -140,6 +151,8 @@ class ElasticsearchEnterpriseRetrievalBackend:
         ranked_lists: list[list[str]],
         source_hints: list[str] | None,
         candidates: dict[str, EnterpriseRetrievedDocument],
+        rrf_k: int,
+        source_hint_soft_boost: float,
     ) -> dict[str, float]:
         scores: defaultdict[str, float] = defaultdict(float)
         for ranked_ids in ranked_lists:
@@ -148,13 +161,13 @@ class ElasticsearchEnterpriseRetrievalBackend:
                 if not doc_id or doc_id in seen:
                     continue
                 seen.add(doc_id)
-                scores[doc_id] += 1.0 / (RRF_K + rank)
+                scores[doc_id] += 1.0 / (rrf_k + rank)
         source_hint_set = {source for source in (source_hints or []) if source}
         if source_hint_set:
             for doc_id, score in list(scores.items()):
                 document = candidates.get(doc_id)
                 if document and document.source_type in source_hint_set:
-                    scores[doc_id] = score * (1.0 + SOURCE_HINT_SOFT_BOOST)
+                    scores[doc_id] = score * (1.0 + source_hint_soft_boost)
         return dict(scores)
 
     async def _rerank_documents(self, query: str, documents: list[EnterpriseRetrievedDocument]) -> list[EnterpriseRetrievedDocument]:

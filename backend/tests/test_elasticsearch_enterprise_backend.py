@@ -98,3 +98,21 @@ def test_elasticsearch_backend_skips_disabled_dense_search():
     assert result["dense_results"] == []
     assert len(client.search_calls) == 1
     assert "query" in client.search_calls[0]["body"]
+
+
+def test_elasticsearch_backend_uses_configurable_rrf_parameters():
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+
+    backend = ElasticsearchEnterpriseRetrievalBackend(
+        client=FakeElasticsearchClient(),
+        embeddings=FakeEmbeddings(),
+        index_name="idx",
+        rrf_k=10,
+        source_hint_soft_boost=0.0,
+    )
+
+    import asyncio
+
+    result = asyncio.run(backend.retrieve_with_details("policy", 2, 5, 5, 5, ["policy"], False))
+
+    assert round(result["fused_results"][0]["score"], 6) == round(1 / 11, 6)
