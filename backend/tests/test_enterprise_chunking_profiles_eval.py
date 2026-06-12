@@ -6,13 +6,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.evaluate_enterprise_chunking_profiles import (
+    BACKEND_DIR,
     ChunkProfile,
     build_eval_command,
     build_index_command,
     build_prepare_command,
+    build_profile_plan,
     build_run_record,
+    main,
+    parse_k_values,
     render_comparison_report,
     select_winner,
+    validate_report_k_values,
     stage1_profiles,
 )
 
@@ -44,7 +49,7 @@ def test_build_prepare_command_uses_parent_child_profile_paths():
 
     command = build_prepare_command(profile=profile, output_dir=output_dir, sample_size=10000)
 
-    assert command[:4] == ["python", "backend/scripts/prepare_enterprise_rag_bench.py", "--strategy", "parent_child"]
+    assert command[:4] == ["python", str(BACKEND_DIR / "scripts" / "prepare_enterprise_rag_bench.py"), "--strategy", "parent_child"]
     assert "--output-dir" in command
     assert str(output_dir) in command
     assert command[command.index("--parent-chunk-size") + 1] == "3000"
@@ -65,11 +70,36 @@ def test_build_index_command_uses_profile_specific_collection_and_paths():
         reset=True,
     )
 
-    assert command[:2] == ["python", "backend/scripts/index_enterprise_chunks_chroma.py"]
+    assert command[:2] == ["python", str(BACKEND_DIR / "scripts" / "index_enterprise_chunks_chroma.py")]
     assert command[command.index("--chunks-path") + 1] == str(chunks_path)
     assert command[command.index("--persist-dir") + 1] == str(persist_dir)
     assert command[command.index("--collection-name") + 1] == "enterprise_chunking_baseline"
     assert "--reset" in command
+
+
+def test_build_profile_plan_contains_prepare_index_eval_commands():
+    profile = ChunkProfile("baseline", 3000, 300, 700, 100)
+    plan = build_profile_plan(
+        stage="stage1",
+        profile=profile,
+        output_root=Path("backend/data/chunking_eval_outputs"),
+        sample_size=10000,
+        embedding_model="qwen3-embedding:latest",
+        method="chroma_bm25_rrf_reranker",
+        k_values="1,5,10,20",
+        limit=None,
+        reset_index=True,
+    )
+
+    assert plan["run_id"] == "enterprise_chunking_stage1_baseline"
+    assert plan["collection_name"] == "enterprise_chunking_stage1_baseline"
+    assert plan["prepared_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/prepared")
+    assert plan["persist_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/chroma")
+    assert plan["eval_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/eval")
+    assert plan["prepare_command"][1] == str(BACKEND_DIR / "scripts" / "prepare_enterprise_rag_bench.py")
+    assert plan["index_command"][1] == str(BACKEND_DIR / "scripts" / "index_enterprise_chunks_chroma.py")
+    assert plan["eval_command"][1] == str(BACKEND_DIR / "scripts" / "evaluate_enterprise_hybrid_retrieval.py")
+    assert plan["eval_command"][plan["eval_command"].index("--embedding-model") + 1] == "qwen3-embedding:latest"
 
 
 def test_build_eval_command_points_at_profile_index_and_chunks():
@@ -84,15 +114,17 @@ def test_build_eval_command_points_at_profile_index_and_chunks():
         output_dir=output_dir,
         method="chroma_bm25_rrf_reranker",
         k_values="1,5,10,20",
+        embedding_model="qwen3-embedding:latest",
         limit=25,
     )
 
-    assert command[:2] == ["python", "backend/scripts/evaluate_enterprise_hybrid_retrieval.py"]
+    assert command[:2] == ["python", str(BACKEND_DIR / "scripts" / "evaluate_enterprise_hybrid_retrieval.py")]
     assert command[command.index("--questions-path") + 1] == str(prepared_dir / "questions.jsonl")
     assert command[command.index("--child-chunks-path") + 1] == str(prepared_dir / "child_chunks_parent_child.jsonl")
     assert command[command.index("--parent-chunks-path") + 1] == str(prepared_dir / "parent_chunks_parent_child.jsonl")
     assert command[command.index("--persist-dir") + 1] == str(persist_dir)
     assert command[command.index("--output-dir") + 1] == str(output_dir)
+    assert command[command.index("--embedding-model") + 1] == "qwen3-embedding:latest"
     assert command[command.index("--limit") + 1] == "25"
 
 
@@ -127,7 +159,7 @@ def test_build_run_record_uses_source_agnostic_shape():
         summary=summary,
         chunk_stats=chunk_stats,
         details_path=Path("details.jsonl"),
-        report_path=Path("report.md"),
+        report_path=None,
     )
 
     assert record["run_id"] == "enterprise_chunking_stage1_baseline"
@@ -139,6 +171,53 @@ def test_build_run_record_uses_source_agnostic_shape():
     assert "mrr@10" not in record["summary_metrics"]
     assert record["chunk_statistics"]["total_child_chunks"] == 123
     assert record["details_path"] == "details.jsonl"
+    assert record["report_path"] is None
+
+
+def test_parse_k_values_returns_sorted_deduped_positive_values():
+    assert parse_k_values("10,5,5,1") == [1, 5, 10]
+
+
+def test_parse_k_values_rejects_zero_values():
+    with pytest.raises(ValueError):
+        parse_k_values("0,5,10")
+
+
+def test_parse_k_values_rejects_negative_values():
+    with pytest.raises(ValueError):
+        parse_k_values("-1,5,10")
+
+
+def test_parse_k_values_rejects_invalid_text():
+    with pytest.raises(ValueError):
+        parse_k_values("five,10")
+
+
+@pytest.mark.parametrize("value", ["5,,10", "5,", ",5,10", "   "])
+def test_parse_k_values_rejects_empty_tokens(value):
+    with pytest.raises(ValueError, match="empty values"):
+        parse_k_values(value)
+
+
+def test_main_rejects_empty_k_values_before_running_child_commands(monkeypatch):
+    def fail_if_called(command, dry_run):
+        raise AssertionError(f"Unexpected child command: {command}")
+
+    monkeypatch.setattr(sys, "argv", ["evaluate_enterprise_chunking_profiles.py", "--dry-run", "--k-values", "5,,10"])
+    monkeypatch.setattr("scripts.evaluate_enterprise_chunking_profiles.run_command", fail_if_called)
+
+    with pytest.raises(ValueError, match="empty values"):
+        main()
+
+
+def test_validate_report_k_values_requires_stage_report_columns():
+    validate_report_k_values([1, 5, 10, 20])
+
+    with pytest.raises(ValueError, match="include"):
+        validate_report_k_values([1, 5, 20])
+
+    with pytest.raises(ValueError, match="include"):
+        validate_report_k_values([1, 10, 20])
 
 
 def test_build_run_record_rejects_missing_required_report_k_values():

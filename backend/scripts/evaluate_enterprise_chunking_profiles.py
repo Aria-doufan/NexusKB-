@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,9 @@ DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_METHOD = "chroma_bm25_rrf_reranker"
 DEFAULT_K_VALUES = "1,5,10,20"
+PREPARE_SCRIPT = BACKEND_DIR / "scripts" / "prepare_enterprise_rag_bench.py"
+INDEX_SCRIPT = BACKEND_DIR / "scripts" / "index_enterprise_chunks_chroma.py"
+EVAL_SCRIPT = BACKEND_DIR / "scripts" / "evaluate_enterprise_hybrid_retrieval.py"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +57,7 @@ def build_prepare_command(
 ) -> list[str]:
     return [
         "python",
-        "backend/scripts/prepare_enterprise_rag_bench.py",
+        str(PREPARE_SCRIPT),
         "--strategy",
         "parent_child",
         "--output-dir",
@@ -79,7 +84,7 @@ def build_index_command(
 ) -> list[str]:
     command = [
         "python",
-        "backend/scripts/index_enterprise_chunks_chroma.py",
+        str(INDEX_SCRIPT),
         "--chunks-path",
         str(chunks_path),
         "--persist-dir",
@@ -101,11 +106,12 @@ def build_eval_command(
     output_dir: Path,
     method: str,
     k_values: str,
+    embedding_model: str,
     limit: int | None,
 ) -> list[str]:
     command = [
         "python",
-        "backend/scripts/evaluate_enterprise_hybrid_retrieval.py",
+        str(EVAL_SCRIPT),
         "--method",
         method,
         "--questions-path",
@@ -122,10 +128,78 @@ def build_eval_command(
         str(output_dir),
         "--k-values",
         k_values,
+        "--embedding-model",
+        embedding_model,
     ]
     if limit is not None:
         command.extend(["--limit", str(limit)])
     return command
+
+
+def parse_k_values(value: str) -> list[int]:
+    items = [item.strip() for item in value.split(",")]
+    if any(item == "" for item in items):
+        raise ValueError(f"--k-values must not include empty values: {value}")
+
+    try:
+        k_values = {int(item) for item in items}
+    except ValueError as exc:
+        raise ValueError(f"Invalid k-value in --k-values: {value}") from exc
+
+    if not k_values:
+        raise ValueError("--k-values must include at least one integer")
+
+    non_positive_values = sorted(k_value for k_value in k_values if k_value <= 0)
+    if non_positive_values:
+        invalid_values = ", ".join(str(k_value) for k_value in non_positive_values)
+        raise ValueError(f"--k-values must be positive integers; got: {invalid_values}")
+
+    return sorted(k_values)
+
+
+def build_profile_plan(
+    stage: str,
+    profile: ChunkProfile,
+    output_root: Path,
+    sample_size: int,
+    embedding_model: str,
+    method: str,
+    k_values: str,
+    limit: int | None,
+    reset_index: bool,
+) -> dict[str, Any]:
+    profile_root = output_root / stage / profile.name
+    prepared_dir = profile_root / "prepared"
+    persist_dir = profile_root / "chroma"
+    eval_dir = profile_root / "eval"
+    collection_name = f"enterprise_chunking_{stage}_{profile.name}"
+    return {
+        "run_id": f"enterprise_chunking_{stage}_{profile.name}",
+        "profile": profile,
+        "profile_root": profile_root,
+        "prepared_dir": prepared_dir,
+        "persist_dir": persist_dir,
+        "eval_dir": eval_dir,
+        "collection_name": collection_name,
+        "prepare_command": build_prepare_command(profile, prepared_dir, sample_size),
+        "index_command": build_index_command(
+            chunks_path=prepared_dir / "child_chunks_parent_child.jsonl",
+            persist_dir=persist_dir,
+            collection_name=collection_name,
+            embedding_model=embedding_model,
+            reset=reset_index,
+        ),
+        "eval_command": build_eval_command(
+            prepared_dir=prepared_dir,
+            persist_dir=persist_dir,
+            collection_name=collection_name,
+            output_dir=eval_dir,
+            method=method,
+            k_values=k_values,
+            embedding_model=embedding_model,
+            limit=limit,
+        ),
+    }
 
 
 def validate_report_k_values(k_values: list[int]) -> None:
@@ -207,7 +281,7 @@ def build_run_record(
     summary: dict[str, Any],
     chunk_stats: dict[str, Any],
     details_path: Path,
-    report_path: Path,
+    report_path: Path | None,
 ) -> dict[str, Any]:
     validate_report_k_values(k_values)
     return {
@@ -230,7 +304,7 @@ def build_run_record(
         "question_type_summary": summary.get("question_type_summary", {}),
         "chunk_statistics": _chunk_statistics(chunk_stats),
         "details_path": str(details_path),
-        "report_path": str(report_path),
+        "report_path": str(report_path) if report_path is not None else None,
     }
 
 
@@ -294,3 +368,98 @@ def render_comparison_report(stage: str, records: list[dict[str, Any]]) -> str:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run enterprise chunking recall profile evaluations.")
+    parser.add_argument("--stage", choices=["stage1"], default="stage1")
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--sample-size", type=int, default=10_000)
+    parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
+    parser.add_argument("--method", default=DEFAULT_METHOD)
+    parser.add_argument("--k-values", default=DEFAULT_K_VALUES)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-prepare", action="store_true")
+    parser.add_argument("--skip-index", action="store_true")
+    parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument("--no-reset-index", action="store_true")
+    return parser.parse_args()
+
+
+def run_command(command: list[str], dry_run: bool) -> None:
+    printable = " ".join(command)
+    print(printable, flush=True)
+    if dry_run:
+        return
+    subprocess.run(command, check=True)
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def execute_profile(plan: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
+    if not args.skip_prepare:
+        run_command(plan["prepare_command"], args.dry_run)
+    if not args.skip_index:
+        run_command(plan["index_command"], args.dry_run)
+    if not args.skip_eval:
+        run_command(plan["eval_command"], args.dry_run)
+    if args.dry_run:
+        return None
+
+    eval_dir = plan["eval_dir"]
+    summary_path = eval_dir / f"{args.method}_summary.json"
+    details_path = eval_dir / f"{args.method}_details.jsonl"
+    profile_report_path = eval_dir / "report.md"
+    report_path = profile_report_path if profile_report_path.exists() else None
+    summary = load_json(summary_path)
+    chunk_stats = load_json(plan["prepared_dir"] / "dataset_stats.json")
+    record = build_run_record(
+        run_id=plan["run_id"],
+        source_type="enterprise",
+        profile=plan["profile"],
+        collection_name=plan["collection_name"],
+        embedding_model=args.embedding_model,
+        retrieval_method=args.method,
+        k_values=parse_k_values(args.k_values),
+        summary=summary,
+        chunk_stats=chunk_stats,
+        details_path=details_path,
+        report_path=report_path,
+    )
+    write_json(plan["profile_root"] / "run_record.json", record)
+    return record
+
+
+def main() -> None:
+    args = parse_args()
+    validate_report_k_values(parse_k_values(args.k_values))
+    profiles = stage1_profiles()
+    records = []
+    for profile in profiles:
+        plan = build_profile_plan(
+            stage=args.stage,
+            profile=profile,
+            output_root=args.output_root,
+            sample_size=args.sample_size,
+            embedding_model=args.embedding_model,
+            method=args.method,
+            k_values=args.k_values,
+            limit=args.limit,
+            reset_index=not args.no_reset_index,
+        )
+        record = execute_profile(plan, args)
+        if record is not None:
+            records.append(record)
+
+    if records:
+        stage_dir = args.output_root / args.stage
+        write_json(stage_dir / "comparison_summary.json", {"stage": args.stage, "records": records})
+        (stage_dir / "report.md").write_text(render_comparison_report(args.stage, records), encoding="utf-8")
+
+
+
+if __name__ == "__main__":
+    main()
