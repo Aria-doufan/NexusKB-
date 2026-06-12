@@ -14,6 +14,8 @@ The evaluation target remains parent_doc_id relevance against expected_doc_ids.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import concurrent.futures
 import csv
 import json
 import math
@@ -198,6 +200,12 @@ def parse_args() -> argparse.Namespace:
         "--method",
         choices=METHODS,
         default="chroma_bm25_rrf",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["chroma", "elasticsearch"],
+        default="chroma",
+        help="Retrieval backend used for candidate generation. Chroma preserves the existing evaluator path; Elasticsearch uses the enterprise ES backend.",
     )
     parser.add_argument("--questions-path", type=Path, default=DEFAULT_QUESTIONS_PATH)
     parser.add_argument("--child-chunks-path", type=Path, default=DEFAULT_CHILD_CHUNKS_PATH)
@@ -466,6 +474,32 @@ def chroma_search(
             )
         )
     return candidates
+
+
+def run_coroutine_sync(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coro)).result()
+
+
+def candidate_from_backend_document(row: dict[str, Any]) -> Candidate:
+    metadata = dict(row.get("metadata") or {})
+    chunk_id = metadata.get("chunk_id") or row.get("parent_chunk_id", "")
+    evidence_chunk_ids = [chunk_id] if chunk_id else []
+    return Candidate(
+        chunk_id=chunk_id,
+        parent_doc_id=row.get("parent_doc_id", ""),
+        parent_chunk_id=row.get("parent_chunk_id", ""),
+        source_type=row.get("source_type", metadata.get("source_type", "")),
+        title=row.get("title", metadata.get("title", "")),
+        section_heading=row.get("section_heading", metadata.get("section_heading", "")),
+        text=row.get("child_text") or row.get("parent_text") or "",
+        evidence_chunk_ids=evidence_chunk_ids,
+        fused_score=float(row.get("score", 0.0) or 0.0),
+    )
 
 
 def graph_search(
@@ -807,6 +841,8 @@ def evaluate_question(
     graph_index: Any | None = None,
     graph_search_k: int = 0,
     graph_depth: int = 1,
+    backend: str = "chroma",
+    retrieval_backend: Any | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     normalized_method = normalize_method(method)
@@ -815,10 +851,28 @@ def evaluate_question(
     graph_candidates: list[Candidate] = []
     graph_source_hints = question.source_types if should_apply_source_boost(normalized_method) else []
 
-    if method_needs_graph(normalized_method) and graph_index is None:
+    if backend == "elasticsearch":
+        if retrieval_backend is None:
+            raise ValueError("Elasticsearch backend is selected, but retrieval_backend is not initialized")
+        dense_top_k = chroma_search_k if method_needs_chroma(normalized_method) else 0
+        lexical_top_k = bm25_search_k if method_needs_bm25(normalized_method) else 0
+        raw = run_coroutine_sync(
+            retrieval_backend.retrieve_with_details(
+                query=question.question,
+                final_top_k=max(k_values),
+                dense_top_k=dense_top_k,
+                bm25_top_k=lexical_top_k,
+                fusion_top_k=max(dense_top_k, lexical_top_k, max(k_values)),
+                source_hints=question.source_types if should_apply_source_boost(normalized_method) else None,
+                use_reranker=False,
+            )
+        )
+        ranked_candidates = [candidate_from_backend_document(row) for row in raw["selected_documents"]]
+        reranker_model = None
+    elif method_needs_graph(normalized_method) and graph_index is None:
         raise ValueError(f"Method {method} requires graph index, but graph_index is not initialized")
 
-    if method_uses_decompose(normalized_method, question):
+    if backend == "chroma" and method_uses_decompose(normalized_method, question):
         if store is None:
             raise ValueError(f"Method {method} requires Chroma, but store is not initialized")
         if bm25 is None:
@@ -859,7 +913,7 @@ def evaluate_question(
             key=lambda item: item.fused_score,
             reverse=True,
         )
-    else:
+    elif backend == "chroma":
         if method_needs_chroma(normalized_method):
             if store is None:
                 raise ValueError(f"Method {method} requires Chroma, but store is not initialized")
@@ -1195,15 +1249,16 @@ def write_standard_retrieval_outputs(
         "dataset_path": str(args.questions_path),
         "question_count": len(details),
         "method": args.method,
+        "backend": args.backend,
         "k_values": k_values,
         "embedding_model": args.embedding_model,
         "collection_name": args.collection_name,
         "persist_dir": str(args.persist_dir),
-        "reranker_model_path": args.reranker_model_path if method_needs_reranker(normalize_method(args.method)) else None,
-        "reranker_candidate_k": args.reranker_candidate_k,
-        "graph_dir": str(args.graph_dir) if method_needs_graph(normalize_method(args.method)) else None,
-        "graph_search_k": args.graph_search_k if method_needs_graph(normalize_method(args.method)) else None,
-        "graph_depth": args.graph_depth if method_needs_graph(normalize_method(args.method)) else None,
+        "reranker_model_path": args.reranker_model_path if args.backend == "chroma" and method_needs_reranker(normalize_method(args.method)) else None,
+        "reranker_candidate_k": args.reranker_candidate_k if args.backend == "chroma" and method_needs_reranker(normalize_method(args.method)) else None,
+        "graph_dir": str(args.graph_dir) if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
+        "graph_search_k": args.graph_search_k if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
+        "graph_depth": args.graph_depth if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
         "judge_provider": None,
         "judge_model": None,
         "ci": args.ci,
@@ -1235,15 +1290,31 @@ def main() -> None:
     questions = load_questions(args.questions_path, args.limit)
     if not questions:
         raise ValueError(f"No questions loaded from {args.questions_path}")
+    if args.backend == "elasticsearch":
+        if args.where_source_type:
+            raise ValueError("--where-source-type is not supported for Elasticsearch evaluation yet")
+        if method_needs_graph(normalized_method):
+            raise ValueError("Graph evaluation methods are not supported for Elasticsearch evaluation yet")
+        if method_needs_reranker(normalized_method):
+            raise ValueError("Reranker evaluation methods are not supported for Elasticsearch evaluation yet")
+        if any(method_uses_decompose(normalized_method, question) for question in questions):
+            raise ValueError("Decomposition evaluation methods are not supported for Elasticsearch evaluation yet")
+
+    retrieval_backend = None
+    if args.backend == "elasticsearch":
+        from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+        from app.rag.retrieval_backends.factory import load_rag_config
+
+        retrieval_backend = ElasticsearchEnterpriseRetrievalBackend.from_config(load_rag_config())
 
     bm25 = None
-    if method_needs_bm25(normalized_method):
+    if args.backend == "chroma" and method_needs_bm25(normalized_method):
         print(f"Loading BM25 child chunks from {args.child_chunks_path} ...", flush=True)
         bm25 = ChildChunkBM25.from_jsonl(args.child_chunks_path)
         print(f"Loaded {len(bm25.records)} child chunks for BM25.", flush=True)
 
     store = None
-    if method_needs_chroma(normalized_method):
+    if args.backend == "chroma" and method_needs_chroma(normalized_method):
         embeddings = OllamaEmbeddings(
             model=args.embedding_model,
             base_url=args.ollama_base_url,
@@ -1257,7 +1328,7 @@ def main() -> None:
 
     reranker_model = None
     parent_texts: dict[str, str] = {}
-    if method_needs_reranker(normalized_method):
+    if args.backend == "chroma" and method_needs_reranker(normalized_method):
         print(f"Loading parent chunks from {args.parent_chunks_path} ...", flush=True)
         parent_texts = load_parent_texts(args.parent_chunks_path)
         print(f"Loading reranker from {args.reranker_model_path} ...", flush=True)
@@ -1268,7 +1339,7 @@ def main() -> None:
         )
 
     graph_index = None
-    if method_needs_graph(normalized_method):
+    if args.backend == "chroma" and method_needs_graph(normalized_method):
         print(f"Loading graph index from {args.graph_dir} ...", flush=True)
         graph_index = maybe_load_graph_index(normalized_method, args.graph_dir)
         print(
@@ -1297,6 +1368,8 @@ def main() -> None:
             graph_index=graph_index,
             graph_search_k=args.graph_search_k,
             graph_depth=args.graph_depth,
+            backend=args.backend,
+            retrieval_backend=retrieval_backend,
         )
         details.append(detail)
         print(
@@ -1311,6 +1384,7 @@ def main() -> None:
     summary.update(
         {
             "method": args.method,
+            "backend": args.backend,
             "normalized_method": normalized_method,
             "collection_name": args.collection_name,
             "persist_dir": str(args.persist_dir.resolve()),
