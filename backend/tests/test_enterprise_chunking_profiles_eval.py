@@ -79,10 +79,11 @@ def test_build_index_command_uses_profile_specific_collection_and_paths():
 
 def test_build_profile_plan_contains_prepare_index_eval_commands():
     profile = ChunkProfile("baseline", 3000, 300, 700, 100)
+    output_root = Path("backend/data/chunking_eval_outputs")
     plan = build_profile_plan(
         stage="stage1",
         profile=profile,
-        output_root=Path("backend/data/chunking_eval_outputs"),
+        output_root=output_root,
         sample_size=10000,
         embedding_model="qwen3-embedding:latest",
         method="chroma_bm25_rrf_reranker",
@@ -90,16 +91,52 @@ def test_build_profile_plan_contains_prepare_index_eval_commands():
         limit=None,
         reset_index=True,
     )
+    expected_profile_root = output_root.resolve() / "stage1" / "baseline"
 
     assert plan["run_id"] == "enterprise_chunking_stage1_baseline"
     assert plan["collection_name"] == "enterprise_chunking_stage1_baseline"
-    assert plan["prepared_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/prepared")
-    assert plan["persist_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/chroma")
-    assert plan["eval_dir"] == Path("backend/data/chunking_eval_outputs/stage1/baseline/eval")
+    assert plan["prepared_dir"] == expected_profile_root / "prepared"
+    assert plan["persist_dir"] == expected_profile_root / "chroma"
+    assert plan["eval_dir"] == expected_profile_root / "eval"
     assert plan["prepare_command"][1] == str(BACKEND_DIR / "scripts" / "prepare_enterprise_rag_bench.py")
     assert plan["index_command"][1] == str(BACKEND_DIR / "scripts" / "index_enterprise_chunks_chroma.py")
     assert plan["eval_command"][1] == str(BACKEND_DIR / "scripts" / "evaluate_enterprise_hybrid_retrieval.py")
     assert plan["eval_command"][plan["eval_command"].index("--embedding-model") + 1] == "qwen3-embedding:latest"
+
+
+def test_build_profile_plan_resolves_relative_output_root_for_artifact_paths():
+    profile = ChunkProfile("baseline", 3000, 300, 700, 100)
+    output_root = Path("relative/chunking_outputs")
+    plan = build_profile_plan(
+        stage="stage1",
+        profile=profile,
+        output_root=output_root,
+        sample_size=10000,
+        embedding_model="qwen3-embedding:latest",
+        method="chroma_bm25_rrf_reranker",
+        k_values="1,5,10,20",
+        limit=None,
+        reset_index=True,
+    )
+    expected_profile_root = output_root.resolve() / "stage1" / "baseline"
+    expected_prepared_dir = expected_profile_root / "prepared"
+    expected_persist_dir = expected_profile_root / "chroma"
+    expected_eval_dir = expected_profile_root / "eval"
+
+    assert plan["prepared_dir"] == expected_prepared_dir
+    assert plan["persist_dir"] == expected_persist_dir
+    assert plan["eval_dir"] == expected_eval_dir
+    assert plan["prepared_dir"].is_absolute()
+    assert plan["persist_dir"].is_absolute()
+    assert plan["eval_dir"].is_absolute()
+    assert plan["prepare_command"][plan["prepare_command"].index("--output-dir") + 1] == str(expected_prepared_dir)
+    assert plan["index_command"][plan["index_command"].index("--chunks-path") + 1] == str(expected_prepared_dir / "child_chunks_parent_child.jsonl")
+    assert plan["index_command"][plan["index_command"].index("--persist-dir") + 1] == str(expected_persist_dir)
+    assert plan["eval_command"][plan["eval_command"].index("--questions-path") + 1] == str(expected_prepared_dir / "questions.jsonl")
+    assert plan["eval_command"][plan["eval_command"].index("--child-chunks-path") + 1] == str(expected_prepared_dir / "child_chunks_parent_child.jsonl")
+    assert plan["eval_command"][plan["eval_command"].index("--parent-chunks-path") + 1] == str(expected_prepared_dir / "parent_chunks_parent_child.jsonl")
+    assert plan["eval_command"][plan["eval_command"].index("--persist-dir") + 1] == str(expected_persist_dir)
+    assert plan["eval_command"][plan["eval_command"].index("--output-dir") + 1] == str(expected_eval_dir)
 
 
 def test_build_eval_command_points_at_profile_index_and_chunks():

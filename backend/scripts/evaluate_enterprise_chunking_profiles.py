@@ -168,6 +168,7 @@ def build_profile_plan(
     limit: int | None,
     reset_index: bool,
 ) -> dict[str, Any]:
+    output_root = output_root.resolve()
     profile_root = output_root / stage / profile.name
     prepared_dir = profile_root / "prepared"
     persist_dir = profile_root / "chroma"
