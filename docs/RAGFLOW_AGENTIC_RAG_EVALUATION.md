@@ -124,6 +124,35 @@ Report delta comparison defaults:
 - Generation baseline: `backend/data/eval_baselines/generation/current/generation_ragas_summary.json`.
 - `--baseline-dir <path>` can override either default.
 
+## Enterprise Chunking Recall Evaluation
+
+Use `backend/scripts/evaluate_enterprise_chunking_profiles.py` to compare parent-child chunking profiles for the enterprise corpus without changing online Agentic RAG behavior.
+
+Stage 1 compares:
+
+| Profile | Parent size / overlap | Child size / overlap |
+| --- | ---: | ---: |
+| `baseline` | `3000 / 300` | `700 / 100` |
+| `smaller_child` | `3000 / 300` | `500 / 80` |
+| `larger_child` | `3000 / 300` | `900 / 120` |
+| `larger_parent` | `4000 / 400` | `700 / 100` |
+
+Primary metrics are `recall@10`, `evidence_coverage@10`, and `hit@5`. Secondary checks are `mrr@20`, `ndcg@10`, latency, and chunk statistics.
+
+Dry-run command:
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --dry-run --limit 2
+```
+
+Full Stage 1 command:
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py
+```
+
+Outputs are written under `backend/data/chunking_eval_outputs/stage1/`, including one `run_record.json` per profile and a stage-level `report.md`. The record format includes `source_type` so future uploaded-document RAG evaluation can reuse the same schema after its query set and expected evidence labels exist.
+
 ## 5. 检索指标公式
 
 ### 5.1 Hit@K
