@@ -92,23 +92,29 @@ def average_numeric(rows: Iterable[dict[str, Any]], key: str) -> float:
     return sum(values) / len(values)
 
 
-def build_question_type_summary(
-    details: Iterable[dict[str, Any]], k_values: Iterable[int]
+def build_group_summary(
+    details: Iterable[dict[str, Any]], k_values: Iterable[int], group_key: str
 ) -> dict[str, dict[str, float | int]]:
-    """Average retrieval metrics grouped by question_type."""
+    """Average retrieval metrics grouped by a scalar or multi-value detail field."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in details:
-        grouped[str(row.get("question_type", "unknown"))].append(row)
+        raw_groups = row.get(group_key, "unknown")
+        if isinstance(raw_groups, (list, tuple, set)):
+            groups = [str(value) for value in raw_groups if value]
+        else:
+            groups = [str(raw_groups)] if raw_groups else []
+        for group in set(groups) or {"unknown"}:
+            grouped[group].append(row)
 
     k_list = list(k_values)
     max_k = max(k_list) if k_list else 0
     summary: dict[str, dict[str, float | int]] = {}
 
-    for question_type, rows in grouped.items():
+    for group, rows in grouped.items():
         evidence_coverage_rows = [
             row for row in rows if row.get("required_evidence_groups_count", 0) > 0
         ]
-        type_summary: dict[str, float | int] = {
+        group_summary: dict[str, float | int] = {
             "questions": len(rows),
             "evidence_coverage_questions": len(evidence_coverage_rows),
             "average_latency_ms": average_numeric(rows, "latency_ms"),
@@ -125,12 +131,19 @@ def build_question_type_summary(
                 "ndcg",
                 "ap",
             ):
-                type_summary[f"{metric}@{k}"] = average_numeric(rows, f"{metric}@{k}")
-            type_summary[f"map@{k}"] = average_numeric(rows, f"ap@{k}")
-            type_summary[f"evidence_coverage@{k}"] = average_numeric(
+                group_summary[f"{metric}@{k}"] = average_numeric(rows, f"{metric}@{k}")
+            group_summary[f"map@{k}"] = average_numeric(rows, f"ap@{k}")
+            group_summary[f"evidence_coverage@{k}"] = average_numeric(
                 evidence_coverage_rows, f"evidence_coverage@{k}"
             )
 
-        summary[question_type] = type_summary
+        summary[group] = group_summary
 
     return summary
+
+
+def build_question_type_summary(
+    details: Iterable[dict[str, Any]], k_values: Iterable[int]
+) -> dict[str, dict[str, float | int]]:
+    """Average retrieval metrics grouped by question_type."""
+    return build_group_summary(details, k_values, "question_type")

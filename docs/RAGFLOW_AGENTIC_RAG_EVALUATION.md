@@ -124,34 +124,50 @@ Report delta comparison defaults:
 - Generation baseline: `backend/data/eval_baselines/generation/current/generation_ragas_summary.json`.
 - `--baseline-dir <path>` can override either default.
 
-## Enterprise Chunking Recall Evaluation
+## Enterprise Chroma-Only Semantic Chunking Evaluation
 
-Use `backend/scripts/evaluate_enterprise_chunking_profiles.py` to compare parent-child chunking profiles for the enterprise corpus without changing online Agentic RAG behavior.
+Use `backend/scripts/evaluate_enterprise_chunking_profiles.py` to compare parent-child chunking profiles for the enterprise corpus without changing online Agentic RAG behavior. This chunking track is Chroma-only: Elasticsearch is intentionally excluded until a Chroma winner exists, so chunk-size and boundary effects are isolated before adding a second retrieval backend.
 
-Stage 1 compares:
+All profiles in a stage must share the same sample fingerprint: `sample_size`, `seed`, document count/hash, and question count/hash. The runner writes the stage fingerprint to `sample_fingerprint.json` and rejects comparisons where profiles were prepared from different document/question samples.
 
-| Profile | Parent size / overlap | Child size / overlap |
-| --- | ---: | ---: |
-| `baseline` | `3000 / 300` | `700 / 100` |
-| `smaller_child` | `3000 / 300` | `500 / 80` |
-| `larger_child` | `3000 / 300` | `900 / 120` |
-| `larger_parent` | `4000 / 400` | `700 / 100` |
+Primary metrics are `recall@10`, `evidence_coverage@10`, and `hit@5`. Secondary checks are `mrr@20`, `ndcg@10`, latency, total child chunks, and semantic-type breakdowns when available.
 
-Primary metrics are `recall@10`, `evidence_coverage@10`, and `hit@5`. Secondary checks are `mrr@20`, `ndcg@10`, latency, and chunk statistics.
-
-Dry-run command:
+Primary Stage 1 command:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --dry-run --limit 2
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 10000 --seed 42
 ```
 
-Full Stage 1 command:
+Smoke command:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 25 --seed 42 --limit 5
 ```
 
-Outputs are written under `backend/data/chunking_eval_outputs/stage1/`, including one `run_record.json` per profile and a stage-level `report.md`. The record format includes `source_type` so future uploaded-document RAG evaluation can reuse the same schema after its query set and expected evidence labels exist.
+Stage 1 compares fixed-size recursive child chunking profiles:
+
+| Profile | Boundary mode | Parent size / overlap | Child size / overlap |
+| --- | --- | ---: | ---: |
+| `fixed_baseline` | `recursive` | `3000 / 300` | `700 / 100` |
+| `fixed_smaller_child` | `recursive` | `3000 / 300` | `500 / 80` |
+| `fixed_larger_child` | `recursive` | `3000 / 300` | `900 / 120` |
+| `fixed_larger_parent` | `recursive` | `4000 / 400` | `700 / 100` |
+
+After Stage 1 selects the strongest fixed-size baseline, Stage 2 compares semantic-boundary child chunking profiles:
+
+| Profile | Boundary mode | Parent size / overlap | Child size / overlap |
+| --- | --- | ---: | ---: |
+| `semantic_baseline_threshold` | `semantic` | `3000 / 300` | `700 / 100` |
+| `semantic_smaller_child` | `semantic` | `3000 / 300` | `500 / 80` |
+| `semantic_larger_child` | `semantic` | `3000 / 300` | `900 / 120` |
+
+Run Stage 2 with the same sampling controls once Stage 1 has a winner:
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage2_semantic --method chroma_bm25_rrf --sample-size 10000 --seed 42
+```
+
+Outputs are written under `backend/data/chunking_eval_outputs/<stage>/`, including one `run_record.json` per profile, `comparison_summary.json`, `sample_fingerprint.json`, and a stage-level `report.md` titled `Enterprise Chroma Chunking Evaluation Report`. The record format includes `source_type` so future uploaded-document RAG evaluation can reuse the same schema after its query set and expected evidence labels exist.
 
 ## Elasticsearch Enterprise Retrieval Backend
 
