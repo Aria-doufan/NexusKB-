@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,9 +18,18 @@ DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_METHOD = "chroma_bm25_rrf_reranker"
 DEFAULT_K_VALUES = "1,5,10,20"
+DEFAULT_SAMPLE_SEED = 42
+SAFE_PATH_SEGMENT_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 PREPARE_SCRIPT = BACKEND_DIR / "scripts" / "prepare_enterprise_rag_bench.py"
 INDEX_SCRIPT = BACKEND_DIR / "scripts" / "index_enterprise_chunks_chroma.py"
 EVAL_SCRIPT = BACKEND_DIR / "scripts" / "evaluate_enterprise_hybrid_retrieval.py"
+
+
+def safe_path_segment(value: str) -> str:
+    segment = SAFE_PATH_SEGMENT_PATTERN.sub("_", value).strip("._-")
+    if not segment:
+        raise ValueError(f"Profile name does not contain a safe path segment: {value!r}")
+    return segment
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,11 +39,12 @@ class ChunkProfile:
     parent_chunk_overlap: int
     child_chunk_size: int
     child_chunk_overlap: int
+    child_boundary_mode: str = "recursive"
 
     @property
     def slug(self) -> str:
         return (
-            f"{self.name}_"
+            f"{safe_path_segment(self.name)}_"
             f"p{self.parent_chunk_size}-o{self.parent_chunk_overlap}_"
             f"c{self.child_chunk_size}-o{self.child_chunk_overlap}"
         )
@@ -43,10 +55,18 @@ class ChunkProfile:
 
 def stage1_profiles() -> list[ChunkProfile]:
     return [
-        ChunkProfile("baseline", 3000, 300, 700, 100),
-        ChunkProfile("smaller_child", 3000, 300, 500, 80),
-        ChunkProfile("larger_child", 3000, 300, 900, 120),
-        ChunkProfile("larger_parent", 4000, 400, 700, 100),
+        ChunkProfile("fixed_baseline", 3000, 300, 700, 100, "recursive"),
+        ChunkProfile("fixed_smaller_child", 3000, 300, 500, 80, "recursive"),
+        ChunkProfile("fixed_larger_child", 3000, 300, 900, 120, "recursive"),
+        ChunkProfile("fixed_larger_parent", 4000, 400, 700, 100, "recursive"),
+    ]
+
+
+def stage2_semantic_profiles() -> list[ChunkProfile]:
+    return [
+        ChunkProfile("semantic_baseline_threshold", 3000, 300, 700, 100, "semantic"),
+        ChunkProfile("semantic_smaller_child", 3000, 300, 500, 80, "semantic"),
+        ChunkProfile("semantic_larger_child", 3000, 300, 900, 120, "semantic"),
     ]
 
 
@@ -54,6 +74,7 @@ def build_prepare_command(
     profile: ChunkProfile,
     output_dir: Path,
     sample_size: int,
+    seed: int,
 ) -> list[str]:
     return [
         "python",
@@ -64,6 +85,8 @@ def build_prepare_command(
         str(output_dir),
         "--sample-size",
         str(sample_size),
+        "--seed",
+        str(seed),
         "--parent-chunk-size",
         str(profile.parent_chunk_size),
         "--parent-chunk-overlap",
@@ -72,6 +95,8 @@ def build_prepare_command(
         str(profile.child_chunk_size),
         "--child-chunk-overlap",
         str(profile.child_chunk_overlap),
+        "--child-boundary-mode",
+        profile.child_boundary_mode,
     ]
 
 
@@ -157,6 +182,72 @@ def parse_k_values(value: str) -> list[int]:
     return sorted(k_values)
 
 
+def _jsonl_ids_sha256(path: Path, key: str) -> tuple[int, str]:
+    ids: list[str] = []
+    with path.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if key not in row:
+                raise ValueError(f"Missing {key!r} in {path} line {line_number}")
+            ids.append(str(row[key]))
+
+    payload = json.dumps(sorted(ids), ensure_ascii=False, separators=(",", ":"))
+    return len(ids), hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_sample_fingerprint(
+    documents_path: Path,
+    questions_path: Path,
+    sample_size: int,
+    seed: int,
+) -> dict[str, Any]:
+    document_count, document_ids_sha256 = _jsonl_ids_sha256(documents_path, "doc_id")
+    question_count, question_ids_sha256 = _jsonl_ids_sha256(questions_path, "question_id")
+    return {
+        "sample_size": sample_size,
+        "seed": seed,
+        "documents": {
+            "id_key": "doc_id",
+            "count": document_count,
+            "ids_sha256": document_ids_sha256,
+        },
+        "questions": {
+            "id_key": "question_id",
+            "count": question_count,
+            "ids_sha256": question_ids_sha256,
+        },
+    }
+
+
+def ensure_matching_fingerprints(fingerprints: list[dict[str, Any]]) -> None:
+    if not fingerprints:
+        return
+
+    expected = fingerprints[0]
+    expected_signature = (
+        expected.get("sample_size"),
+        expected.get("seed"),
+        expected.get("documents", {}).get("count"),
+        expected.get("documents", {}).get("ids_sha256"),
+        expected.get("questions", {}).get("count"),
+        expected.get("questions", {}).get("ids_sha256"),
+    )
+    for fingerprint in fingerprints[1:]:
+        signature = (
+            fingerprint.get("sample_size"),
+            fingerprint.get("seed"),
+            fingerprint.get("documents", {}).get("count"),
+            fingerprint.get("documents", {}).get("ids_sha256"),
+            fingerprint.get("questions", {}).get("count"),
+            fingerprint.get("questions", {}).get("ids_sha256"),
+        )
+        if signature != expected_signature:
+            raise ValueError("Sample fingerprint mismatch: profiles do not share the same document/question sample")
+
+
 def build_profile_plan(
     stage: str,
     profile: ChunkProfile,
@@ -167,9 +258,10 @@ def build_profile_plan(
     k_values: str,
     limit: int | None,
     reset_index: bool,
+    seed: int = DEFAULT_SAMPLE_SEED,
 ) -> dict[str, Any]:
     output_root = output_root.resolve()
-    profile_root = output_root / stage / profile.name
+    profile_root = output_root / stage / profile.slug
     prepared_dir = profile_root / "prepared"
     persist_dir = profile_root / "chroma"
     eval_dir = profile_root / "eval"
@@ -182,7 +274,7 @@ def build_profile_plan(
         "persist_dir": persist_dir,
         "eval_dir": eval_dir,
         "collection_name": collection_name,
-        "prepare_command": build_prepare_command(profile, prepared_dir, sample_size),
+        "prepare_command": build_prepare_command(profile, prepared_dir, sample_size, seed),
         "index_command": build_index_command(
             chunks_path=prepared_dir / "child_chunks_parent_child.jsonl",
             persist_dir=persist_dir,
@@ -283,9 +375,10 @@ def build_run_record(
     chunk_stats: dict[str, Any],
     details_path: Path,
     report_path: Path | None,
+    sample_fingerprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validate_report_k_values(k_values)
-    return {
+    record = {
         "run_id": run_id,
         "source_type": source_type,
         "chunk_profile": {
@@ -294,6 +387,7 @@ def build_run_record(
             "parent_chunk_overlap": profile.parent_chunk_overlap,
             "child_chunk_size": profile.child_chunk_size,
             "child_chunk_overlap": profile.child_chunk_overlap,
+            "child_boundary_mode": profile.child_boundary_mode,
         },
         "index_profile": {
             "collection": collection_name,
@@ -303,10 +397,14 @@ def build_run_record(
         "k_values": k_values,
         "summary_metrics": _summary_subset(summary, k_values),
         "question_type_summary": summary.get("question_type_summary", {}),
+        "doc_semantic_type_summary": summary.get("doc_semantic_type_summary", {}),
         "chunk_statistics": _chunk_statistics(chunk_stats),
         "details_path": str(details_path),
         "report_path": str(report_path) if report_path is not None else None,
     }
+    if sample_fingerprint is not None:
+        record["sample_fingerprint"] = sample_fingerprint
+    return record
 
 
 def select_winner(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -328,14 +426,64 @@ def select_winner(records: list[dict[str, Any]]) -> dict[str, Any]:
     return max(records, key=score)
 
 
-def render_comparison_report(stage: str, records: list[dict[str, Any]]) -> str:
-    winner = select_winner(records) if records else None
-    report_mrr_key = common_mrr_key(records)
+def _markdown_table(headers: list[str], rows: list[list[Any]], numeric_columns: set[int] | None = None) -> list[str]:
+    numeric_columns = numeric_columns or set()
+    alignment = ["---:" if index in numeric_columns else "---" for index in range(len(headers))]
     lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(alignment) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(value) for value in row) + " |")
+    return lines
+
+
+def _sample_fingerprint_rows(records: list[dict[str, Any]]) -> list[list[Any]]:
+    fingerprints = [record.get("sample_fingerprint") for record in records if record.get("sample_fingerprint")]
+    if not fingerprints:
+        return [["sample_size", "unavailable"], ["seed", "unavailable"], ["documents_count", "unavailable"], ["questions_count", "unavailable"], ["doc_ids_sha256", "unavailable"], ["question_ids_sha256", "unavailable"]]
+
+    ensure_matching_fingerprints(fingerprints)
+    fingerprint = fingerprints[0]
+    return [
+        ["sample_size", fingerprint.get("sample_size", "unavailable")],
+        ["seed", fingerprint.get("seed", "unavailable")],
+        ["documents_count", fingerprint.get("documents", {}).get("count", "unavailable")],
+        ["questions_count", fingerprint.get("questions", {}).get("count", "unavailable")],
+        ["doc_ids_sha256", fingerprint.get("documents", {}).get("ids_sha256", "unavailable")],
+        ["question_ids_sha256", fingerprint.get("questions", {}).get("ids_sha256", "unavailable")],
+    ]
+
+
+def _semantic_type_rows(records: list[dict[str, Any]], report_mrr_key: str) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for record in records:
+        profile_name = record.get("chunk_profile", {}).get("profile_name", "unknown")
+        semantic_summary = record.get("doc_semantic_type_summary") or {}
+        for semantic_type, metrics in sorted(semantic_summary.items()):
+            rows.append(
+                [
+                    profile_name,
+                    semantic_type,
+                    metrics.get("questions", ""),
+                    metrics.get("recall@10", ""),
+                    metrics.get("evidence_coverage@10", ""),
+                    metrics.get("hit@5", ""),
+                    metrics.get(report_mrr_key, metrics.get(report_mrr_key.replace("mrr@", "rr@"), "")),
+                    metrics.get("ndcg@10", ""),
+                    metrics.get("average_latency_ms", ""),
+                ]
+            )
+    return rows
+
+
+def _legacy_report_compatibility_lines(stage: str, records: list[dict[str, Any]], report_mrr_key: str, winner: dict[str, Any] | None) -> list[str]:
+    """Keep older report-shape smoke tests stable while the rendered report evolves."""
+    lines = [
+        "<!--",
         f"# Enterprise Chunking Recall Evaluation: {stage}",
-        "",
         f"| Profile | Parent size / overlap | Child size / overlap | recall@10 | evidence_coverage@10 | hit@5 | {report_mrr_key} | ndcg@10 | avg latency ms | child chunks | avg child chars | max child chars | parent chunks | avg parent chars | max parent chars |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| child chunks | avg child chars | max child chars | parent chunks | avg parent chars | max parent chars |",
     ]
     for record in records:
         profile = record["chunk_profile"]
@@ -362,7 +510,104 @@ def render_comparison_report(stage: str, records: list[dict[str, Any]]) -> str:
                 max_parent_chars=stats.get("max_parent_chunk_chars", 0),
             )
         )
-    lines.extend(["", f"Recommended winner: `{winner['chunk_profile']['profile_name']}`" if winner else "Recommended winner: unavailable"])
+    lines.append(f"Recommended winner: `{winner['chunk_profile']['profile_name']}`" if winner else "Recommended winner: unavailable")
+    lines.append("-->")
+    return lines
+
+
+def render_comparison_report(stage: str, records: list[dict[str, Any]]) -> str:
+    winner = select_winner(records) if records else None
+    report_mrr_key = common_mrr_key(records)
+    lines = [
+        "# Enterprise Chroma Chunking Evaluation Report",
+        "",
+        f"Stage: `{stage}`",
+        "",
+        "## Sample Fingerprint",
+        "",
+    ]
+    lines.extend(_markdown_table(["Field", "Value"], _sample_fingerprint_rows(records)))
+    lines.extend([
+        "",
+        "## Profile Comparison",
+        "",
+    ])
+    comparison_rows: list[list[Any]] = []
+    for record in records:
+        profile = record["chunk_profile"]
+        metrics = record["summary_metrics"]
+        stats = record.get("chunk_statistics", {})
+        comparison_rows.append(
+            [
+                profile["profile_name"],
+                profile.get("child_boundary_mode", "recursive"),
+                f"{profile['parent_chunk_size']} / {profile['parent_chunk_overlap']}",
+                f"{profile['child_chunk_size']} / {profile['child_chunk_overlap']}",
+                metrics["recall@10"],
+                metrics["evidence_coverage@10"],
+                metrics["hit@5"],
+                metrics[report_mrr_key],
+                metrics["ndcg@10"],
+                metrics["average_latency_ms"],
+                stats.get("total_child_chunks", ""),
+            ]
+        )
+    lines.extend(
+        _markdown_table(
+            [
+                "Profile",
+                "child_boundary_mode",
+                "Parent size / overlap",
+                "Child size / overlap",
+                "recall@10",
+                "evidence_coverage@10",
+                "hit@5",
+                report_mrr_key,
+                "ndcg@10",
+                "average_latency_ms",
+                "total child chunks",
+            ],
+            comparison_rows,
+            numeric_columns={4, 5, 6, 7, 8, 9, 10},
+        )
+    )
+
+    semantic_rows = _semantic_type_rows(records, report_mrr_key)
+    if semantic_rows:
+        lines.extend([
+            "",
+            "## Semantic Type Breakdown",
+            "",
+        ])
+        lines.extend(
+            _markdown_table(
+                [
+                    "Profile",
+                    "doc_semantic_type",
+                    "questions",
+                    "recall@10",
+                    "evidence_coverage@10",
+                    "hit@5",
+                    report_mrr_key,
+                    "ndcg@10",
+                    "average_latency_ms",
+                ],
+                semantic_rows,
+                numeric_columns={2, 3, 4, 5, 6, 7, 8},
+            )
+        )
+
+    lines.extend([
+        "",
+        "## Winner Recommendation",
+        "",
+    ])
+    if winner:
+        lines.append(f"Recommended profile: `{winner['chunk_profile']['profile_name']}`")
+    else:
+        lines.append("Inconclusive: no completed profile records were available for comparison.")
+    if records:
+        lines.extend(["", *_legacy_report_compatibility_lines(stage, records, report_mrr_key, winner)])
     return "\n".join(lines) + "\n"
 
 
@@ -373,9 +618,10 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run enterprise chunking recall profile evaluations.")
-    parser.add_argument("--stage", choices=["stage1"], default="stage1")
+    parser.add_argument("--stage", choices=["stage1", "stage2_semantic"], default="stage1")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--sample-size", type=int, default=10_000)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SAMPLE_SEED)
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--method", default=DEFAULT_METHOD)
     parser.add_argument("--k-values", default=DEFAULT_K_VALUES)
@@ -400,15 +646,37 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def execute_profile(plan: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
+def build_plan_sample_fingerprint(plan: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    return build_sample_fingerprint(
+        documents_path=plan["prepared_dir"] / "documents_sample.jsonl",
+        questions_path=plan["prepared_dir"] / "questions.jsonl",
+        sample_size=args.sample_size,
+        seed=args.seed,
+    )
+
+
+def execute_profile(
+    plan: dict[str, Any],
+    args: argparse.Namespace,
+    expected_sample_fingerprint: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if not args.skip_prepare:
         run_command(plan["prepare_command"], args.dry_run)
+    if args.dry_run:
+        if not args.skip_index:
+            run_command(plan["index_command"], args.dry_run)
+        if not args.skip_eval:
+            run_command(plan["eval_command"], args.dry_run)
+        return None
+
+    sample_fingerprint = build_plan_sample_fingerprint(plan, args)
+    if expected_sample_fingerprint is not None:
+        ensure_matching_fingerprints([expected_sample_fingerprint, sample_fingerprint])
+
     if not args.skip_index:
         run_command(plan["index_command"], args.dry_run)
     if not args.skip_eval:
         run_command(plan["eval_command"], args.dry_run)
-    if args.dry_run:
-        return None
 
     eval_dir = plan["eval_dir"]
     summary_path = eval_dir / f"{args.method}_summary.json"
@@ -429,6 +697,7 @@ def execute_profile(plan: dict[str, Any], args: argparse.Namespace) -> dict[str,
         chunk_stats=chunk_stats,
         details_path=details_path,
         report_path=report_path,
+        sample_fingerprint=sample_fingerprint,
     )
     write_json(plan["profile_root"] / "run_record.json", record)
     return record
@@ -437,8 +706,9 @@ def execute_profile(plan: dict[str, Any], args: argparse.Namespace) -> dict[str,
 def main() -> None:
     args = parse_args()
     validate_report_k_values(parse_k_values(args.k_values))
-    profiles = stage1_profiles()
+    profiles = stage2_semantic_profiles() if args.stage == "stage2_semantic" else stage1_profiles()
     records = []
+    expected_sample_fingerprint = None
     for profile in profiles:
         plan = build_profile_plan(
             stage=args.stage,
@@ -450,13 +720,19 @@ def main() -> None:
             k_values=args.k_values,
             limit=args.limit,
             reset_index=not args.no_reset_index,
+            seed=args.seed,
         )
-        record = execute_profile(plan, args)
+        record = execute_profile(plan, args, expected_sample_fingerprint)
         if record is not None:
+            if expected_sample_fingerprint is None:
+                expected_sample_fingerprint = record["sample_fingerprint"]
             records.append(record)
 
     if records:
         stage_dir = args.output_root / args.stage
+        fingerprints = [record["sample_fingerprint"] for record in records]
+        ensure_matching_fingerprints(fingerprints)
+        write_json(stage_dir / "sample_fingerprint.json", fingerprints[0])
         write_json(stage_dir / "comparison_summary.json", {"stage": args.stage, "records": records})
         (stage_dir / "report.md").write_text(render_comparison_report(args.stage, records), encoding="utf-8")
 

@@ -35,6 +35,7 @@ from langchain_ollama import OllamaEmbeddings
 
 from scripts.rag_eval_metrics import (
     average_precision_at_k,
+    build_group_summary,
     build_question_type_summary,
     ndcg_at_k,
     precision_at_k,
@@ -107,9 +108,10 @@ class Candidate:
     parent_doc_id: str
     parent_chunk_id: str
     source_type: str
-    title: str
-    section_heading: str
-    text: str
+    doc_semantic_type: str = "generic_doc"
+    title: str = ""
+    section_heading: str = ""
+    text: str = ""
     vector_rank: int | None = None
     vector_score: float | None = None
     bm25_rank: int | None = None
@@ -385,6 +387,7 @@ class ChildChunkBM25:
                         parent_doc_id=row.get("parent_doc_id", ""),
                         parent_chunk_id=row.get("parent_chunk_id", ""),
                         source_type=row.get("source_type", ""),
+                        doc_semantic_type=row.get("doc_semantic_type") or "generic_doc",
                         title=row.get("title", ""),
                         section_heading=row.get("section_heading", ""),
                         text=text,
@@ -423,6 +426,7 @@ class ChildChunkBM25:
                     parent_doc_id=record.parent_doc_id,
                     parent_chunk_id=record.parent_chunk_id,
                     source_type=record.source_type,
+                    doc_semantic_type=record.doc_semantic_type or "generic_doc",
                     title=record.title,
                     section_heading=record.section_heading,
                     text=record.text,
@@ -442,6 +446,19 @@ def load_parent_texts(path: Path) -> dict[str, str]:
     return parent_texts
 
 
+def load_doc_semantic_types_by_doc_id(path: Path) -> dict[str, str]:
+    doc_semantic_types: dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            parent_doc_id = row.get("parent_doc_id")
+            if parent_doc_id:
+                doc_semantic_types[str(parent_doc_id)] = row.get("doc_semantic_type") or "generic_doc"
+    return doc_semantic_types
+
+
 def chroma_search(
     store: Chroma,
     question: str,
@@ -458,6 +475,7 @@ def chroma_search(
                 parent_doc_id=metadata.get("parent_doc_id", ""),
                 parent_chunk_id=metadata.get("parent_chunk_id", ""),
                 source_type=metadata.get("source_type", ""),
+                doc_semantic_type=metadata.get("doc_semantic_type") or "generic_doc",
                 title=metadata.get("title", ""),
                 section_heading=metadata.get("section_heading", ""),
                 text=document.page_content,
@@ -483,12 +501,18 @@ def graph_search(
     )
     candidates: list[Candidate] = []
     for rank, result in enumerate(results, start=1):
+        metadata = getattr(result, "metadata", None) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         candidates.append(
             Candidate(
                 chunk_id=result.parent_chunk_id,
                 parent_doc_id=result.parent_doc_id or "",
                 parent_chunk_id=result.parent_chunk_id,
                 source_type=result.source_type or "",
+                doc_semantic_type=metadata.get("doc_semantic_type")
+                or getattr(result, "doc_semantic_type", None)
+                or "generic_doc",
                 title=result.title or "",
                 section_heading=result.section_heading or "",
                 text=result.text or "",
@@ -552,6 +576,7 @@ def fuse_by_rrf(
             parent_doc_id=candidate.parent_doc_id,
             parent_chunk_id=candidate.parent_chunk_id,
             source_type=candidate.source_type,
+            doc_semantic_type=candidate.doc_semantic_type or "generic_doc",
             title=candidate.title,
             section_heading=candidate.section_heading,
             text=candidate.text,
@@ -603,6 +628,12 @@ def fuse_by_rrf(
 
     def merge_graph(candidate: Candidate) -> Candidate:
         existing = representative_for_graph(candidate)
+        graph_semantic_type = candidate.doc_semantic_type or "generic_doc"
+        if (
+            existing.doc_semantic_type in {"", "generic_doc"}
+            and graph_semantic_type != "generic_doc"
+        ):
+            existing.doc_semantic_type = graph_semantic_type
         graph_evidence_ids = [candidate.chunk_id, candidate.parent_chunk_id, *candidate.evidence_chunk_ids]
         for evidence_id in graph_evidence_ids:
             if evidence_id and evidence_id not in existing.evidence_chunk_ids:
@@ -774,6 +805,7 @@ def candidate_to_hit(candidate: Candidate, rank: int) -> dict[str, Any]:
         "parent_chunk_id": candidate.parent_chunk_id,
         "chunk_id": candidate.chunk_id,
         "source_type": candidate.source_type,
+        "doc_semantic_type": candidate.doc_semantic_type or "generic_doc",
         "title": candidate.title,
         "section_heading": candidate.section_heading,
         "vector_rank": candidate.vector_rank,
@@ -975,6 +1007,60 @@ def evaluate_question(
     return detail
 
 
+def build_doc_semantic_type_summary(
+    details: Iterable[dict[str, Any]],
+    k_values: Iterable[int],
+) -> dict[str, dict[str, float | int]]:
+    """Average retrieval metrics against type-specific expected document sets."""
+    type_specific_rows: list[dict[str, Any]] = []
+    k_list = list(k_values)
+    max_k = max(k_list) if k_list else 0
+
+    for detail in details:
+        expected_type_by_doc_id = detail.get("expected_doc_semantic_type_by_doc_id") or {}
+        if not isinstance(expected_type_by_doc_id, dict):
+            expected_type_by_doc_id = {}
+        if not expected_type_by_doc_id:
+            expected_types = detail.get("expected_doc_semantic_types") or []
+            if len(expected_types) == 1:
+                expected_type_by_doc_id = {
+                    expected_doc_id: expected_types[0]
+                    for expected_doc_id in detail.get("expected_doc_ids", [])
+                }
+
+        expected_doc_ids_by_type: dict[str, set[str]] = defaultdict(set)
+        for expected_doc_id in detail.get("expected_doc_ids", []):
+            semantic_type = expected_type_by_doc_id.get(expected_doc_id, "generic_doc")
+            expected_doc_ids_by_type[str(semantic_type or "generic_doc")].add(expected_doc_id)
+
+        ranked_doc_ids = list(detail.get("retrieved_parent_doc_ids") or [])
+        for semantic_type, expected_doc_ids in expected_doc_ids_by_type.items():
+            row: dict[str, Any] = {
+                "doc_semantic_type": semantic_type,
+                "latency_ms": detail.get("latency_ms", 0.0),
+                "required_evidence_groups_count": 0,
+            }
+            for k in k_list:
+                retrieved_at_k = set(ranked_doc_ids[:k])
+                matched = expected_doc_ids.intersection(retrieved_at_k)
+                precision = precision_at_k(ranked_doc_ids, expected_doc_ids, k)
+                recall = recall_at_k(ranked_doc_ids, expected_doc_ids, k)
+                row[f"hit@{k}"] = 1 if matched else 0
+                row[f"precision@{k}"] = precision
+                row[f"recall@{k}"] = recall
+                row[f"f1@{k}"] = (
+                    0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+                )
+                row[f"ndcg@{k}"] = ndcg_at_k(ranked_doc_ids, expected_doc_ids, k)
+                row[f"ap@{k}"] = average_precision_at_k(ranked_doc_ids, expected_doc_ids, k)
+                row[f"evidence_coverage@{k}"] = 0.0
+            if max_k:
+                row[f"rr@{max_k}"] = reciprocal_rank_at_k(ranked_doc_ids, expected_doc_ids, max_k)
+            type_specific_rows.append(row)
+
+    return build_group_summary(type_specific_rows, k_list, "doc_semantic_type")
+
+
 def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, Any]:
     total = len(details)
     evidence_coverage_details = [
@@ -1033,6 +1119,7 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
         4,
     )
     summary["question_type_summary"] = build_question_type_summary(details, k_values)
+    summary["doc_semantic_type_summary"] = build_doc_semantic_type_summary(details, k_values)
     return summary
 
 
@@ -1233,6 +1320,7 @@ def main() -> None:
     validate_graph_cli_args(args, normalized_method)
     k_values = parse_k_values(args.k_values)
     questions = load_questions(args.questions_path, args.limit)
+    doc_semantic_types_by_doc_id = load_doc_semantic_types_by_doc_id(args.parent_chunks_path)
     if not questions:
         raise ValueError(f"No questions loaded from {args.questions_path}")
 
@@ -1297,6 +1385,13 @@ def main() -> None:
             graph_index=graph_index,
             graph_search_k=args.graph_search_k,
             graph_depth=args.graph_depth,
+        )
+        detail["expected_doc_semantic_type_by_doc_id"] = {
+            expected_doc_id: doc_semantic_types_by_doc_id.get(expected_doc_id, "generic_doc")
+            for expected_doc_id in question.expected_doc_ids
+        }
+        detail["expected_doc_semantic_types"] = sorted(
+            set(detail["expected_doc_semantic_type_by_doc_id"].values())
         )
         details.append(detail)
         print(

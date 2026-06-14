@@ -48,6 +48,56 @@ SECTION_PATTERN = re.compile(
     r"^(#{1,6}\s+.+|[A-Za-z][A-Za-z0-9 _/-]{1,80}:|Purpose|Scope|Summary|Architecture notes.*)$"
 )
 
+SOURCE_SEMANTIC_TYPES = {
+    "fireflies": "meeting_notes",
+    "slack": "chat_thread",
+    "gmail": "email_thread",
+    "hubspot": "account_notes",
+    "jira": "issue_ticket",
+    "linear": "issue_ticket",
+}
+
+GITHUB_STRONG_CODE_CHANGE_PATTERN = re.compile(r"\b(pr|pull request|diff|commit|merge|lgtm)\b", re.IGNORECASE)
+GITHUB_REVIEW_PATTERN = re.compile(r"\breview\b", re.IGNORECASE)
+GITHUB_ISSUE_PATTERN = re.compile(
+    r"\b(issue|bug|incident|ticket|failure|error|regression)\b",
+    re.IGNORECASE,
+)
+DOC_SEMANTIC_PATTERNS = [
+    (
+        "policy_rule",
+        re.compile(
+            r"\b(policy|handbook|rule|compliance|security-gating|must complete|must follow)\b|守则|制度|规范",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "playbook",
+        re.compile(
+            r"\b(playbook|runbook|checklist|procedure|process|workflow|onboarding|guide|how to|when to use)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "faq",
+        re.compile(r"\b(faq|frequently asked questions)\b|\b(q|question):(?=\s|$)", re.IGNORECASE),
+    ),
+    (
+        "technical_doc",
+        re.compile(
+            r"\b(architecture|design|rfc|technical spec|specification|adr|proposal)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "meeting_notes",
+        re.compile(
+            r"\b(meeting notes|meeting header|attendees|agenda|action items)\b|\bdecision:(?=\s|$)",
+            re.IGNORECASE,
+        ),
+    ),
+]
+
 
 @dataclass(slots=True)
 class ChunkConfig:
@@ -61,6 +111,7 @@ class ParentChildConfig:
     parent_chunk_overlap: int
     child_chunk_size: int
     child_chunk_overlap: int
+    child_boundary_mode: str = "recursive"
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +148,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parent-chunk-overlap", type=int, default=300)
     parser.add_argument("--child-chunk-size", type=int, default=700)
     parser.add_argument("--child-chunk-overlap", type=int, default=100)
+    parser.add_argument(
+        "--child-boundary-mode",
+        choices=["recursive", "semantic"],
+        default="recursive",
+        help="Child chunk boundary strategy for parent-child output.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--batch-size",
@@ -131,6 +188,29 @@ def build_document_text(row: dict[str, Any]) -> str:
     content = clean_text(row.get("content"))
     header = f"Title: {title}\nSource type: {source_type}"
     return f"{header}\n\n{content}".strip()
+
+
+def infer_doc_semantic_type(source_type: str, title: str, content: str) -> str:
+    """Infer a coarse semantic type from source and document text."""
+    normalized_source = clean_text(source_type).lower()
+    if normalized_source in SOURCE_SEMANTIC_TYPES:
+        return SOURCE_SEMANTIC_TYPES[normalized_source]
+
+    searchable_text = f"{clean_text(title)}\n{clean_text(content)}"
+    if normalized_source == "github":
+        if GITHUB_STRONG_CODE_CHANGE_PATTERN.search(searchable_text):
+            return "code_change"
+        if GITHUB_ISSUE_PATTERN.search(searchable_text):
+            return "issue_ticket"
+        if GITHUB_REVIEW_PATTERN.search(searchable_text):
+            return "code_change"
+        return "code_change"
+
+    for semantic_type, pattern in DOC_SEMANTIC_PATTERNS:
+        if pattern.search(searchable_text):
+            return semantic_type
+
+    return "generic_doc"
 
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> int:
@@ -182,6 +262,7 @@ def normalize_document(row: dict[str, Any], is_gold: bool) -> dict[str, Any]:
         "title": title,
         "content": content,
         "text": text,
+        "doc_semantic_type": infer_doc_semantic_type(source_type, title, content),
         "is_gold": is_gold,
         "content_chars": len(content),
         "text_chars": len(text),
@@ -286,6 +367,91 @@ def recursive_split(text: str, chunk_size: int, separators: list[str]) -> list[s
     return chunks
 
 
+SEMANTIC_UNIT_PATTERNS = {
+    "policy_rule": re.compile(
+        r"^\s*(?:\d+[.)]|[A-Za-z][.)]|[-*])\s+\S|^\s*(?:Rule|Policy|Requirement)\s*\d*\s*:",
+        re.IGNORECASE,
+    ),
+    "meeting_notes": re.compile(
+        r"^\s*(?:Decision|Decisions|Action item|Action items|Actions|Notes|Agenda|Attendees)\s*:",
+        re.IGNORECASE,
+    ),
+    "playbook": re.compile(
+        r"^\s*(?:\d+[.)]|[-*])\s+\S|^\s*(?:Step|Checklist|Procedure)\s*\d*\s*:",
+        re.IGNORECASE,
+    ),
+    "faq": re.compile(r"^\s*(?:Q|Question|A|Answer)\s*:", re.IGNORECASE),
+    "technical_doc": re.compile(
+        r"^\s*(?:#{1,6}\s+\S|(?:Overview|Design|Architecture|Rationale|Implementation|Risks)\s*:)",
+        re.IGNORECASE,
+    ),
+    "issue_ticket": re.compile(
+        r"^\s*(?:Description|Impact|Root cause|Resolution|Acceptance criteria|Steps to reproduce)\s*:",
+        re.IGNORECASE,
+    ),
+}
+
+
+def semantic_units(text: str, doc_semantic_type: str) -> list[str]:
+    pattern = SEMANTIC_UNIT_PATTERNS.get(doc_semantic_type)
+    if pattern is None:
+        return []
+
+    units: list[str] = []
+    current: list[str] = []
+    found_boundary = False
+    for line in text.strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                current.append("")
+            continue
+        is_boundary = bool(pattern.match(stripped))
+        if is_boundary:
+            found_boundary = True
+            if current:
+                units.append("\n".join(current).strip())
+            current = [stripped]
+            continue
+        if current:
+            current.append(stripped)
+        else:
+            current = [stripped]
+
+    if current:
+        units.append("\n".join(current).strip())
+
+    return [unit for unit in units if unit] if found_boundary else []
+
+
+def semantic_child_split(text: str, doc_semantic_type: str, child_chunk_size: int) -> list[str]:
+    units = semantic_units(text, doc_semantic_type)
+    if doc_semantic_type == "generic_doc" or not units:
+        return recursive_split(text, child_chunk_size, STRUCTURAL_SEPARATORS)
+
+    bounded_units: list[str] = []
+    for unit in units:
+        if len(unit) <= child_chunk_size:
+            bounded_units.append(unit)
+        else:
+            bounded_units.extend(recursive_split(unit, child_chunk_size, STRUCTURAL_SEPARATORS))
+
+    chunks: list[str] = []
+    current = ""
+    for unit in bounded_units:
+        candidate = unit if not current else f"{current}\n{unit}"
+        if len(candidate) <= child_chunk_size:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = unit
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def add_overlap(chunks: list[str], overlap: int) -> list[str]:
     if overlap <= 0 or len(chunks) <= 1:
         return chunks
@@ -311,6 +477,7 @@ def extract_section_heading(text: str) -> str:
 
 
 def chunk_document(document: dict[str, Any], config: ChunkConfig) -> list[dict[str, Any]]:
+    doc_semantic_type = document.get("doc_semantic_type", "generic_doc")
     raw_chunks = recursive_split(document["text"], config.chunk_size, STRUCTURAL_SEPARATORS)
     raw_chunks = add_overlap(raw_chunks, config.chunk_overlap)
     chunks: list[dict[str, Any]] = []
@@ -325,6 +492,7 @@ def chunk_document(document: dict[str, Any], config: ChunkConfig) -> list[dict[s
                 "chunk_id": chunk_id,
                 "parent_doc_id": document["doc_id"],
                 "source_type": document["source_type"],
+                "doc_semantic_type": doc_semantic_type,
                 "title": document["title"],
                 "chunk_index": index,
                 "section_heading": extract_section_heading(text),
@@ -380,6 +548,7 @@ def chunk_document_parent_child(
     document: dict[str, Any],
     config: ParentChildConfig,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    doc_semantic_type = document.get("doc_semantic_type", "generic_doc")
     parent_texts = recursive_split(
         document["text"],
         config.parent_chunk_size,
@@ -402,6 +571,7 @@ def chunk_document_parent_child(
                 "parent_chunk_id": parent_chunk_id,
                 "parent_doc_id": document["doc_id"],
                 "source_type": document["source_type"],
+                "doc_semantic_type": doc_semantic_type,
                 "title": document["title"],
                 "parent_chunk_index": parent_index,
                 "section_heading": section_heading,
@@ -411,11 +581,18 @@ def chunk_document_parent_child(
             }
         )
 
-        child_texts = recursive_split(
-            parent_text,
-            config.child_chunk_size,
-            STRUCTURAL_SEPARATORS,
-        )
+        if config.child_boundary_mode == "semantic":
+            child_texts = semantic_child_split(
+                parent_text,
+                doc_semantic_type,
+                config.child_chunk_size,
+            )
+        else:
+            child_texts = recursive_split(
+                parent_text,
+                config.child_chunk_size,
+                STRUCTURAL_SEPARATORS,
+            )
         child_texts = add_overlap(child_texts, config.child_chunk_overlap)
         for child_index, child_text in enumerate(child_texts):
             child_text = clean_text(child_text)
@@ -428,6 +605,7 @@ def chunk_document_parent_child(
                     "parent_chunk_id": parent_chunk_id,
                     "parent_doc_id": document["doc_id"],
                     "source_type": document["source_type"],
+                    "doc_semantic_type": doc_semantic_type,
                     "title": document["title"],
                     "parent_chunk_index": parent_index,
                     "child_chunk_index": child_index,
@@ -475,6 +653,7 @@ def build_parent_child_chunks(
         "parent_chunk_overlap": config.parent_chunk_overlap,
         "child_chunk_size": config.child_chunk_size,
         "child_chunk_overlap": config.child_chunk_overlap,
+        "child_boundary_mode": config.child_boundary_mode,
         "total_parent_chunks": len(parent_chunks),
         "total_child_chunks": len(child_chunks),
         "average_parent_chunk_chars": round(sum(parent_lengths) / max(len(parent_lengths), 1), 2),
@@ -546,6 +725,7 @@ def main() -> None:
                 parent_chunk_overlap=args.parent_chunk_overlap,
                 child_chunk_size=args.child_chunk_size,
                 child_chunk_overlap=args.child_chunk_overlap,
+                child_boundary_mode=args.child_boundary_mode,
             ),
         )
         parent_chunks_count = write_jsonl(

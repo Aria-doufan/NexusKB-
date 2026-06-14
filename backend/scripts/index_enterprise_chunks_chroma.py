@@ -118,6 +118,7 @@ def chunk_to_document(row: dict[str, Any]) -> Document:
         "parent_doc_id": row["parent_doc_id"],
         "parent_chunk_id": row.get("parent_chunk_id", ""),
         "source_type": row.get("source_type", ""),
+        "doc_semantic_type": row.get("doc_semantic_type") or "generic_doc",
         "title": row.get("title", ""),
         "chunk_index": int(row.get("chunk_index", 0)),
         "parent_chunk_index": int(row.get("parent_chunk_index", 0)),

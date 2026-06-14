@@ -78,6 +78,8 @@ def render_retrieval_report(
 
     question_type_summary = summary.get("question_type_summary") or {}
     baseline_question_types = (baseline_summary or {}).get("question_type_summary") or {}
+    doc_semantic_type_summary = summary.get("doc_semantic_type_summary") or {}
+    baseline_doc_semantic_types = (baseline_summary or {}).get("doc_semantic_type_summary") or {}
     question_type_metrics = [metric for metric in metrics if metric != "average_latency_ms"]
 
     sections = [
@@ -95,7 +97,16 @@ def render_retrieval_report(
         "",
         "## Question Type Summary",
         "",
-        _render_question_type_table(question_type_summary, question_type_metrics, baseline_question_types),
+        _render_group_summary_table("Question Type", question_type_summary, question_type_metrics, baseline_question_types),
+        "",
+        "## Document Semantic Type Summary",
+        "",
+        _render_group_summary_table(
+            "Document Semantic Type",
+            doc_semantic_type_summary,
+            question_type_metrics,
+            baseline_doc_semantic_types,
+        ),
         "",
         "## Failure Examples",
         "",
@@ -104,28 +115,30 @@ def render_retrieval_report(
     return "\n".join(sections) + "\n"
 
 
-def _render_question_type_table(
-    question_type_summary: dict[str, Any],
+def _render_group_summary_table(
+    group_label: str,
+    group_summary: dict[str, Any],
     metrics: list[str],
-    baseline_question_types: dict[str, Any],
+    baseline_groups: dict[str, Any],
 ) -> str:
-    if not question_type_summary:
-        return "No question type summary available."
+    if not group_summary:
+        return f"No {group_label.lower()} summary available."
 
     lines = [
-        "| Question Type | Metric | Current | Baseline | Delta |",
+        f"| {group_label} | Metric | Current | Baseline | Delta |",
         "| --- | --- | ---: | ---: | ---: |",
     ]
-    for question_type in sorted(question_type_summary):
-        row = question_type_summary[question_type]
-        baseline_row = baseline_question_types.get(question_type)
+    for group in sorted(group_summary):
+        row = group_summary[group]
+        baseline_row = baseline_groups.get(group)
         for metric in metrics:
             if metric not in row:
                 continue
             delta = metric_delta(row, baseline_row, metric)
             baseline_value = "" if baseline_row is None else baseline_row.get(metric, "")
             lines.append(
-                f"| {question_type} | {metric} | {_format_value(row.get(metric, ''))} | "
+                f"| {_escape_table_cell(group)} | {_escape_table_cell(metric)} | "
+                f"{_format_value(row.get(metric, ''))} | "
                 f"{_format_value(baseline_value)} | {_format_value(delta)} |"
             )
     return "\n".join(lines)
