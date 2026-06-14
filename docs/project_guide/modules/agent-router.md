@@ -16,7 +16,7 @@
 
 ```mermaid
 flowchart TD
-    API[FastAPI Chat API] --> RG[RouterGraph]
+    API[FastAPI Chat API] --> RG[RouterGraph 兼容入口]
     RG -->|invoke / stream| AG[AgenticRagGraph]
 
     AG --> LC[load_context]

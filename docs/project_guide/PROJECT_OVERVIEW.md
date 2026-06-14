@@ -1,6 +1,6 @@
 # 项目总览
 
-整理日期：2026-05-15
+整理日期：2026-06-14
 
 ## 项目定位
 
@@ -20,12 +20,13 @@
 
 | 模块 | 当前定位 | 主要目录 |
 | --- | --- | --- |
-| FastAPI 主后端 | Chat Agent、RAG、Router、会话、限流、统一响应 | `backend/` |
-| Django 用户服务 | 用户注册、登录、Token、文件上传 | `DjangoUserService/` |
-| Vue 前端 | 移动端风格聊天、登录注册、会话管理、个人页 | `front/` |
-| 企业 RAG 数据与评测 | EnterpriseRAG-Bench 数据处理、入库、检索评测 | `backend/scripts/`、`backend/data/enterprise_rag_bench/` |
+| FastAPI 主后端 | Chat Agent、Agentic RAG、RouterGraph 兼容入口、会话、限流、统一响应 | `backend/` |
+| Agentic RAG 与检索 | LangGraph 主状态机、RAG evidence workflow、混合召回、RRF、reranker、图谱索引和 web fallback | `backend/app/rag/`、`backend/app/agent/` |
+| Django 用户服务 | 用户注册、登录、Token、文件上传、头像和用户资料 | `DjangoUserService/` |
+| Vue 前端 | 移动端风格聊天、登录注册、会话管理、个人页和设置页 | `front/` |
+| 企业 RAG 数据与评测 | EnterpriseRAG-Bench 数据处理、Chroma/Elasticsearch/Graph 入库、检索与生成评测 | `backend/scripts/`、`backend/data/`、`dataset/` |
+| 本地模型与运行资产 | reranker、本地数据、图片素材和开发启动脚本 | `models/`、`images/`、`start-dev.ps1` |
 | 学习模块 | 后端模块化学习样例 | `backend_learning_modules/` |
-| DSagent 参考实现 | 作为 LangGraph/Agent 设计参考，不作为当前主线直接迁移 | `DSagent/` |
 
 ## 当前主线能力
 

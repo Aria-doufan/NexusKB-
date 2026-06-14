@@ -60,28 +60,34 @@ flowchart LR
 
 ```text
 NexusKB-
-├── front/                         # Vue 3 前端：登录、聊天、会话、个人中心
+├── backend/                        # FastAPI AI/RAG 后端：AgenticRagGraph、RagEvidenceWorkflow、检索、会话/长期记忆、评测脚本
 ├── DjangoUserService/              # Django 用户服务：注册、登录、JWT、头像、用户资料
-├── backend/                        # FastAPI AI 后端：RouterGraph、RAG、Agent、会话/长期记忆、审计、评测脚本
-├── docs/                           # 架构、路线图、评测、安全、项目指南文档
-├── dataset/                        # 本地数据集，EnterpriseRAG-Bench 等
+├── front/                          # Vue 3 前端：登录、聊天、会话、个人中心、设置
+├── docs/                           # 项目指南、Agentic RAG 专题、实验、运维、面试和归档文档
+├── backend_learning_modules/       # 后端模块化学习样例
+├── dataset/                        # 本地数据集，EnterpriseRAG-Bench、RAGCare-QA 等
 ├── models/                         # 本地模型权重，例如 Qwen3-Reranker
+├── images/                         # 项目图片素材
+├── docker-compose.elasticsearch.yml # Elasticsearch 检索评测环境
 └── start-dev.ps1                   # 本地开发环境启动脚本
 ```
 
 ```mermaid
 flowchart TD
-    A[NexusKB / RAGFlow 项目] --> F[front 前端]
+    A[NexusKB / RAGFlow 项目] --> B[backend AI/RAG 后端]
     A --> D[DjangoUserService 用户服务]
-    A --> B[backend AI/RAG 后端]
+    A --> F[front 前端]
     A --> DOC[docs 文档体系]
-    A --> DATA[dataset / backend/data 数据集与索引]
+    A --> LEARN[backend_learning_modules 学习样例]
+    A --> DATA[dataset / backend/data 数据集、索引与评测输出]
     A --> MODEL[models / Qwen3-Reranker 本地模型]
+    A --> ES[docker-compose.elasticsearch.yml Elasticsearch 评测环境]
 
     F --> F1[登录 / 注册 UI]
     F --> F2[聊天页面 AIChat]
     F --> F3[会话列表 Sessions]
     F --> F4[个人中心 / 头像上传]
+    F --> F5[Profile / Settings]
 
     D --> D1[JWT 鉴权]
     D --> D2[用户资料]
@@ -89,13 +95,13 @@ flowchart TD
     D --> D4[Token 黑名单]
 
     B --> B1[FastAPI 路由]
-    B --> B2[RouterGraph]
-    B --> B3[Enterprise RAG]
-    B --> B4[Pure Chat / Tool Agent]
-    B --> B5[Conversation Memory]
-    B --> B6[Long-term Memory 实验]
-    B --> B7[Audit / Perf / RateLimit]
-    B --> B8[离线评测脚本]
+    B --> B2[RouterGraph 兼容入口]
+    B --> B3[AgenticRagGraph 主状态机]
+    B --> B4[RagEvidenceWorkflow 证据工作流]
+    B --> B5[Hybrid Retrieval / RRF / Rerank / Graph Index]
+    B --> B6[Conversation Memory / Long-term Memory]
+    B --> B7[Audit / Perf / RateLimit / Debug Trace]
+    B --> B8[离线评测与索引脚本]
 ```
 
 ---
@@ -233,39 +239,44 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Q[用户 Query] --> A[Auth / RateLimit / RequestId]
-    A --> M[加载会话上下文<br/>recent window + rolling summary]
-    M -.规划/实验.-> LTM[语义召回长期记忆<br/>user_id filter]
-    M --> R[RouterGraph]
-    LTM -.memory context.-> R
+    A --> RG[RouterGraph 兼容入口]
+    RG --> AG[AgenticRagGraph 主状态机]
+    AG --> M[load_context<br/>recent window + rolling summary]
+    M -.可选.-> LTM[长期记忆召回<br/>user_id filter]
+    LTM -.memory context.-> U
+    M --> U[understand_request]
 
-    R --> R1[route 分类]
-    R --> R2[rag_intent 判断]
-    R --> R3[source_hints / metadata_filters]
-    R --> R4[confidence / reason]
-    R --> R5[安全校验与 route 归一化]
-
-    R5 --> S[Strategy Matrix]
-    S -->|chat| PC[PureChat<br/>safe utility tools]
-    S -->|enterprise_knowledge| ER[Enterprise RAG Pipeline]
-    S -->|tool_action| TA[Tool Agent 预留]
+    U --> S[safety_check]
+    S -->|direct_answer| DA[直接回答]
+    S -->|retrieve| WF[RagEvidenceWorkflow]
+    S -->|tool_call| TA[AgenticToolRunner 受控工具]
     S -->|clarify| CL[澄清问题]
-    S -->|unsafe_or_system| UB[安全拦截]
+    S -->|refuse| RF[安全拒绝]
 
-    ER --> BR{是否复杂意图}
+    WF --> PLAN[planner + strategy_select]
+    PLAN --> BR{复杂意图}
     BR -->|fact_lookup / semantic / constrained| RAW[原始 Query / 可选 rewrite]
-    BR -->|multi_hop / comparison 规划| DEC[Decompose 2-4 sub_queries]
-    RAW --> RET[Dense + BM25]
-    DEC --> PAR[每个 sub_query 并行 Dense + BM25]
+    BR -->|multi_hop / comparison| DEC[Decompose 2-4 sub_queries]
+    RAW --> RET[Chroma + BM25]
+    DEC --> PAR[每个 sub_query 并行检索]
+    RET --> FUS[RRF Fusion + source hint boost]
     PAR --> XMERGE[跨子问题 evidence coverage 合并]
-    RET --> FUS[RRF Fusion]
     FUS --> CAND[候选池]
     XMERGE --> CAND
     CAND --> RK[Reranker 可选]
-    RK --> CTX[Parent Chunk Expansion<br/>Context Compression]
-    CTX --> CIT[Citation Selection]
-    CIT --> GEN[LLM Answer Generation]
+    RK --> EVAL[evidence evaluation]
+    EVAL -->|rewrite / expand_top_k| RETRY[apply_retry]
+    RETRY --> RET
+    EVAL -->|external_search| WEB[web fallback]
+    WEB --> CAND
+    EVAL -->|generate / insufficient evidence| GEN[LLM Answer Generation]
 
-    GEN --> SSE[SSE Events]
+    DA --> FINAL[finalize_trace]
+    TA --> FINAL
+    CL --> FINAL
+    RF --> FINAL
+    GEN --> FINAL
+    FINAL --> SSE[SSE Events]
     SSE --> RESP[RagResponse<br/>answer + sources + strategy + metrics + debug_id]
     RESP --> SAVE[Save Session / Memory / Audit Event]
 ```
@@ -280,67 +291,64 @@ backend/
 ├── app/
 │   ├── router/
 │   │   ├── chat.py                 # /api/agent/query/stream 等主入口
-│   │   ├── chat_service.py         # 业务编排层
+│   │   ├── chat_service.py         # API 业务编排层
 │   │   ├── health.py               # 健康检查
 │   │   └── user.py                 # FastAPI 侧用户详情接口
 │   │
 │   ├── agent/
-│   │   ├── router_graph.py         # LangGraph RouterGraph 核心
-│   │   ├── agent.py                # PureChat / Tool Agent / streaming
-│   │   ├── agent_tools.py          # 工具集合
+│   │   ├── router_graph.py         # RouterGraph 兼容入口，委托 AgenticRagGraph
+│   │   ├── agent.py                # Tool Agent / 普通 Agent 能力
+│   │   ├── agent_tools.py          # 受控工具集合
 │   │   └── agent_middleware.py
 │   │
 │   ├── rag/
-│   │   ├── enterprise_rag_service.py # 企业 RAG 主链路
-│   │   ├── rag_service.py            # 经典 RAG / HyDE / summarization
-│   │   ├── vector_store.py           # Chroma + BM25 上传文档检索
+│   │   ├── agentic_rag_graph.py      # LangGraph 主状态机
+│   │   ├── rag_evidence_workflow.py  # 企业 RAG 证据工作流
+│   │   ├── retrieval_pipeline.py     # Chroma + BM25 + RRF 检索流水线
+│   │   ├── strategy_router.py        # reranker / decompose / retry / web fallback 策略
+│   │   ├── decomposition.py          # multi-hop / comparison 问题分解
+│   │   ├── graph_extraction.py       # 实体关系抽取
+│   │   ├── graph_index_service.py    # 图谱索引构建与查询支撑
+│   │   ├── web_search.py             # 外部搜索回退
+│   │   ├── enterprise_rag_service.py # 企业评测知识库 RAG 服务
+│   │   ├── enterprise_rag_graph.py   # 兼容包装
+│   │   ├── rag_service.py            # 原业务知识库 RAG
+│   │   ├── vector_store.py           # Chroma 向量库和文档入库
 │   │   ├── reorder_service.py        # Qwen3-Reranker
 │   │   └── text_spliter.py           # 文本切分
 │   │
 │   ├── services/
 │   │   ├── database_session_manager.py # 会话/消息持久化
 │   │   ├── conversation_memory.py      # recent window + rolling summary
-│   │   └── long_term_memory.py         # 长期记忆实验：抽取、去重、MySQL+Chroma
-│   │
-│   ├── models/
-│   │   └── chat_history.py          # ChatSession / ChatMessage / ChatSessionMemory / LongTermMemory 规划
+│   │   ├── long_term_memory.py         # 长期记忆抽取、去重和召回
+│   │   └── rag_debug_trace_store.py    # RAG debug trace 存储
 │   │
 │   ├── schemas/
-│   │   └── models.py                # Pydantic 请求/响应模型
+│   │   ├── models.py                # 通用 Pydantic 请求/响应模型
+│   │   ├── rag.py                   # RAG Response Schema
+│   │   ├── rag_debug.py             # RAG Debug Trace Schema
+│   │   └── sse.py                   # SSE Event Schema
 │   │
-│   ├── db/
-│   │   ├── db_config.py             # MySQL async SQLAlchemy
-│   │   └── redis_config.py          # Redis 连接和缓存
-│   │
-│   ├── core/
-│   │   ├── rate_limit.py            # 限流
-│   │   ├── perf.py                  # PERF_METRIC 性能埋点
-│   │   ├── audit.py                 # AUDIT_EVENT 脱敏审计日志
-│   │   ├── logger_handler.py        # 日志
-│   │   └── success/failed response  # 统一响应和异常处理
-│   │
-│   ├── utils/
-│   │   ├── auth_utils.py            # 校验 Django JWT
-│   │   ├── factory.py               # LLM / Embedding 工厂
-│   │   └── config.py                # YAML 配置读取
-│   │
-│   ├── config/
-│   │   ├── rag.yaml
-│   │   ├── chroma.yaml
-│   │   ├── prompt.yaml
-│   │   └── agent.yaml
-│   │
-│   └── prompt/
-│       ├── main_prompt.txt
-│       └── rag_summarize.txt
+│   ├── models/                      # ChatSession / ChatMessage / ChatSessionMemory / LongTermMemory
+│   ├── db/                          # MySQL async SQLAlchemy 与 Redis 连接
+│   ├── core/                        # 限流、审计、性能日志、统一响应和异常处理
+│   ├── cache/                       # Redis 缓存封装
+│   ├── config/                      # rag.yaml / chroma.yaml / prompt.yaml / agent.yaml
+│   ├── prompt/                      # Prompt 模板
+│   └── utils/                       # JWT 校验、LLM/Embedding 工厂、文件处理和配置读取
 │
-└── scripts/
-    ├── prepare_enterprise_rag_bench.py       # 准备 parent/child chunks
-    ├── index_enterprise_chunks_chroma.py     # 建 EnterpriseRAG-Bench parent-child Chroma 索引
-    ├── evaluate_enterprise_retrieval.py
-    ├── evaluate_enterprise_hybrid_retrieval.py # Dense/BM25/RRF/Reranker/策略矩阵评测
-    ├── evaluate_long_term_memory.py          # 长期记忆 E2E 评测
-    └── memory_eval_golden_cases.jsonl        # 长期记忆黄金样例
+├── scripts/
+│   ├── prepare_enterprise_rag_bench.py          # 准备 EnterpriseRAG-Bench parent/child chunks
+│   ├── index_enterprise_chunks_chroma.py        # 建 Chroma 索引
+│   ├── index_enterprise_chunks_elasticsearch.py # 建 Elasticsearch 索引
+│   ├── index_enterprise_graph.py                # 建 Graph Index
+│   ├── evaluate_enterprise_retrieval.py         # Dense / BM25 / RRF / reranker 检索评测
+│   ├── evaluate_enterprise_rag_generation.py    # 生成质量评测
+│   ├── evaluate_long_term_memory.py             # 长期记忆 E2E 评测
+│   └── memory_eval_golden_cases.jsonl           # 长期记忆黄金样例
+│
+├── data/                            # 本地索引、评测输出和运行数据
+└── tests/                           # 后端测试
 ```
 
 ```mermaid
@@ -355,19 +363,36 @@ flowchart TD
     ChatService --> Schema[app/schemas]
     ChatAPI --> Core[app/core]
 
-    Agent --> RG[router_graph.py]
-    Agent --> Pure[agent.py PureChat / Tool Agent]
+    Agent --> RG[router_graph.py<br/>兼容入口]
     Agent --> Tools[agent_tools.py]
+    RG --> AG[agentic_rag_graph.py<br/>主状态机]
 
-    RAG --> ER[enterprise_rag_service.py]
+    RAG --> AG
+    RAG --> WF[rag_evidence_workflow.py]
+    RAG --> Pipeline[retrieval_pipeline.py]
+    RAG --> Strategy[strategy_router.py]
+    RAG --> Graph[graph_extraction.py<br/>graph_index_service.py]
     RAG --> Classic[rag_service.py]
     RAG --> VS[vector_store.py]
     RAG --> Reorder[reorder_service.py]
-    RAG -.规划.-> Decomp[decomposition.py<br/>sub-query planning]
+    RAG --> Web[web_search.py]
+
+    AG --> WF
+    WF --> Pipeline
+    WF --> Strategy
+    Pipeline --> VS
+    Strategy --> Reorder
+    Strategy --> Graph
+    Strategy --> Web
 
     Session --> DBSession[database_session_manager.py]
     Session --> Memory[conversation_memory.py]
-    Session --> LTM[long_term_memory.py<br/>实验]
+    Session --> LTM[long_term_memory.py]
+    Session --> Trace[rag_debug_trace_store.py]
+
+    Schema --> RagSchema[rag.py]
+    Schema --> SseSchema[sse.py]
+    Schema --> DebugSchema[rag_debug.py]
 
     Core --> Rate[rate_limit.py]
     Core --> Perf[perf.py]
@@ -377,7 +402,7 @@ flowchart TD
     Memory --> MySQL
     LTM --> MySQL
     LTM --> Chroma[(ChromaDB)]
-    ER --> Chroma
+    Pipeline --> Chroma
     VS --> Chroma
     ChatAPI --> Redis[(Redis)]
 ```
@@ -601,12 +626,13 @@ flowchart LR
 
 ## 11. Agentic 策略矩阵
 
-Agentic 不是“让 Agent 随便行动”，而是让 Router 输出受控策略。
+Agentic 不是“让 Agent 随便行动”，而是让 `AgenticRagGraph` 在受控 action 和 RAG 策略矩阵内行动。
 
 ```mermaid
 flowchart TD
-    Q[Query] --> Router[RouterGraph]
-    Router --> Intent[rag_intent]
+    Q[Query] --> RG[RouterGraph 兼容入口]
+    RG --> AG[AgenticRagGraph]
+    AG --> Intent[rag_intent]
 
     Intent --> F[fact_lookup]
     Intent --> S[semantic_query]

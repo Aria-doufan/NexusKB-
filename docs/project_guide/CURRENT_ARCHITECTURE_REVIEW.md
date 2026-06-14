@@ -701,52 +701,52 @@ summarizing
 ```text
 backend/app/
   agent/
-    agent.py
-    agent_tools.py
-    router_graph.py
-    agent_middleware.py
+    router_graph.py                 # 兼容旧 RouterGraph API，委托 AgenticRagGraph
+    agent.py                        # Tool Agent / 普通 Agent 能力
+    agent_tools.py                  # 受控工具集合
+    agent_middleware.py             # Agent 中间件
 
   rag/
-    enterprise_rag_service.py
-    rag_service.py
-    vector_store.py
-    reorder_service.py
-    text_spliter.py
+    agentic_rag_graph.py            # LangGraph 主状态机
+    rag_evidence_workflow.py        # 企业 RAG 证据工作流
+    retrieval_pipeline.py           # Chroma + BM25 + RRF 检索流水线
+    strategy_router.py              # 检索、rerank、decompose、retry 策略选择
+    decomposition.py                # multi-hop / comparison 问题分解
+    graph_extraction.py             # 图谱抽取
+    graph_index_service.py          # 图谱索引
+    web_search.py                   # 外部搜索回退
+    enterprise_rag_service.py       # 企业评测知识库 RAG 服务
+    enterprise_rag_graph.py         # 兼容包装
+    rag_service.py                  # 原业务知识库 RAG
+    vector_store.py                 # Chroma 向量库和文档入库
+    reorder_service.py              # reranker 重排序
+    text_spliter.py                 # 文本切分
 
   router/
-    chat.py
-    chat_service.py
+    chat.py                         # 聊天、Agent、RAG、Router API
+    chat_service.py                 # API 业务编排
     user.py
     health.py
 
   services/
-    database_session_manager.py
-    conversation_memory.py
-
-  models/
-    chat_history.py
+    database_session_manager.py     # 会话与消息持久化
+    conversation_memory.py          # 会话压缩记忆
+    long_term_memory.py             # 长期记忆抽取、去重和召回
+    rag_debug_trace_store.py        # RAG debug trace 存储
 
   schemas/
-    models.py
+    models.py                       # 通用响应模型
+    rag.py                          # RAG Response Schema
+    rag_debug.py                    # Debug Trace Schema
+    sse.py                          # SSE Event Schema
 
-  db/
-    db_config.py
-    redis_config.py
-
-  core/
-    rate_limit.py
-    success_response.py
-    failed_response.py
-    logger_handler.py
-
-  utils/
-    auth_utils.py
-    factory.py
-    config.py
-    config_handler.py
-    prompt_loader.py
-    file_handler.py
-    path_tool.py
+  prompt/                           # Prompt 模板
+  models/                           # 会话与消息数据模型
+  db/                               # MySQL / Redis 连接
+  core/                             # 统一响应、限流、日志
+  cache/                            # Redis 缓存封装
+  config/                           # RAG、Chroma、Prompt 和模型配置
+  utils/                            # 鉴权、文件处理、配置读取等工具
 ```
 
 ### 7. 当前架构的优点

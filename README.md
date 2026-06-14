@@ -34,37 +34,42 @@ NexusKB 适合用于：
 ## 目录结构
 
 ```text
-NexusKB/
-├── backend/                 # FastAPI RAG 问答服务
-│   ├── app/                 # 业务代码
-│   │   ├── agent/           # Agent 与路由图
-│   │   ├── cache/           # Redis 缓存封装
-│   │   ├── config/          # RAG、Chroma、Prompt 配置
-│   │   ├── db/              # MySQL / Redis 连接
-│   │   ├── models/          # 会话数据模型
-│   │   ├── rag/             # 检索、向量库、重排序
-│   │   ├── router/          # FastAPI 路由
-│   │   ├── services/        # 会话记忆等业务服务
-│   │   └── utils/           # 通用工具
-│   ├── scripts/             # 数据准备、索引构建和评测脚本
-│   ├── main.py              # FastAPI 入口
+NexusKB-/
+├── backend/                         # FastAPI AI/RAG 后端
+│   ├── app/
+│   │   ├── agent/                   # RouterGraph 兼容入口、工具 Agent 和中间件
+│   │   ├── cache/                   # Redis 缓存封装
+│   │   ├── config/                  # RAG、Chroma、Prompt 和模型配置
+│   │   ├── core/                    # 统一响应、限流、日志等基础能力
+│   │   ├── db/                      # MySQL / Redis 连接配置
+│   │   ├── models/                  # 会话与消息数据模型
+│   │   ├── prompt/                  # Prompt 模板
+│   │   ├── rag/                     # AgenticRagGraph、RagEvidenceWorkflow、混合检索、重排序和图谱索引
+│   │   ├── router/                  # FastAPI 路由与 ChatService
+│   │   ├── schemas/                 # RAG、SSE、Debug Trace 等响应模型
+│   │   ├── services/                # 会话记忆、长期记忆、RAG 调试追踪
+│   │   └── utils/                   # 鉴权、文件处理、配置读取等工具
+│   ├── scripts/                     # EnterpriseRAG-Bench 数据准备、索引构建和评测脚本
+│   ├── data/                        # 本地索引、评测输出和运行数据
+│   ├── tests/                       # 后端测试
+│   ├── main.py                      # FastAPI 入口
 │   └── requirements.txt
-├── DjangoUserService/       # Django 用户服务
-│   ├── apps/                # 用户、文件、工具模块
-│   ├── DjangoUserService/   # Django 项目配置
-│   ├── manage.py
-│   └── requirements.txt
-├── front/                   # Vue 3 前端
-│   ├── src/
-│   ├── package.json
-│   └── vite.config.js
-├── docs/                    # 项目文档、架构说明、实验记录和运维文档
-│   ├── experiments/         # RAG 延迟优化、长期记忆评估等实验记录
-│   ├── ops/                 # 部署、故障排除和模型配置说明
-│   └── project_guide/       # 项目介绍、模块说明和架构图
-├── start-dev.ps1            # Windows 本地开发一键启动脚本
-├── requirements.txt         # Python 聚合依赖
-└── .gitignore
+├── DjangoUserService/               # Django 用户服务：注册、登录、JWT、头像和用户资料
+├── front/                           # Vue 3 前端
+│   └── src/                         # assets、components、i18n、router、store、views
+├── docs/                            # 项目指南、Agentic RAG 专题、实验、运维和归档文档
+│   ├── project_guide/               # 项目总览、当前架构、模块设计和架构图
+│   ├── experiments/                 # RAG 延迟优化、长期记忆评估等实验记录
+│   ├── ops/                         # 部署、排障和模型配置说明
+│   ├── interview/                   # 面试和项目讲述材料
+│   └── archive/                     # 历史计划和阶段性记录
+├── backend_learning_modules/        # 后端模块化学习样例
+├── dataset/                         # EnterpriseRAG-Bench、RAGCare-QA 等数据集
+├── models/                          # 本地模型权重，例如 Qwen3-Reranker
+├── images/                          # 项目图片素材
+├── docker-compose.elasticsearch.yml # Elasticsearch 检索评测环境
+├── start-dev.ps1                    # Windows 本地开发一键启动脚本
+└── requirements.txt                 # Python 聚合依赖
 ```
 
 ## 技术栈
