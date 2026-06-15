@@ -58,6 +58,40 @@ def test_chroma_backend_delegates_to_enterprise_service():
     ]
 
 
+def test_chroma_backend_accepts_metadata_filter_for_pipeline_compatibility():
+    from app.rag.retrieval_backends.chroma_enterprise import ChromaEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    class FakeService:
+        async def retrieve_with_details(self, **kwargs):
+            return {
+                "dense_results": [],
+                "bm25_results": [],
+                "fused_results": [],
+                "reranked_results": [],
+                "selected_documents": [],
+                "metrics": {"dense_ms": 0.0, "bm25_ms": 0.0, "rrf_ms": 0.0, "rerank_ms": 0.0},
+            }
+
+    import asyncio
+
+    backend = ChromaEnterpriseRetrievalBackend(FakeService())
+    result = asyncio.run(
+        backend.retrieve_with_details(
+            query="Find Confluence policy",
+            final_top_k=5,
+            dense_top_k=40,
+            bm25_top_k=40,
+            fusion_top_k=40,
+            source_hints=[],
+            use_reranker=False,
+            metadata_filter=MetadataFilterDecision(mode="hard", source_types=["confluence"]),
+        )
+    )
+
+    assert result["selected_documents"] == []
+
+
 def test_factory_defaults_to_chroma_backend(monkeypatch):
     monkeypatch.delenv("NEXUSKB_RETRIEVAL_BACKEND", raising=False)
 

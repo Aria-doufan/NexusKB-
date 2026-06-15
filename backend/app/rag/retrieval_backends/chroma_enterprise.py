@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.schemas.rag import MetadataFilterDecision
+
 
 class ChromaEnterpriseRetrievalBackend:
     def __init__(self, service=None):
@@ -20,8 +22,9 @@ class ChromaEnterpriseRetrievalBackend:
         fusion_top_k: int,
         source_hints: list[str] | None = None,
         use_reranker: bool = False,
+        metadata_filter: MetadataFilterDecision | None = None,
     ) -> dict[str, Any]:
-        return await self.service.retrieve_with_details(
+        result = await self.service.retrieve_with_details(
             query=query,
             final_top_k=final_top_k,
             dense_top_k=dense_top_k,
@@ -30,3 +33,6 @@ class ChromaEnterpriseRetrievalBackend:
             source_hints=source_hints,
             use_reranker=use_reranker,
         )
+        if "metadata_filter" not in result:
+            result["metadata_filter"] = (metadata_filter or MetadataFilterDecision()).model_dump()
+        return result
