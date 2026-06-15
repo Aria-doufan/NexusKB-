@@ -30,35 +30,39 @@ ALLOWED_DOC_SEMANTIC_TYPES = {
 
 SOURCE_PATTERNS = {
     "slack": re.compile(r"\bslack\b|聊天|群里|频道", re.IGNORECASE),
-    "gmail": re.compile(r"\bgmail\b|email|邮件|邮箱", re.IGNORECASE),
+    "gmail": re.compile(r"\bgmail\b|\bemail\b|邮件|邮箱", re.IGNORECASE),
     "linear": re.compile(r"\blinear\b", re.IGNORECASE),
-    "google_drive": re.compile(r"google drive|drive 文档|共享文档", re.IGNORECASE),
-    "hubspot": re.compile(r"\bhubspot\b|客户记录|account notes", re.IGNORECASE),
-    "fireflies": re.compile(r"\bfireflies\b|会议转录|meeting transcript", re.IGNORECASE),
-    "github": re.compile(r"\bgithub\b|pull request|\bpr\b|commit|repo|代码", re.IGNORECASE),
-    "jira": re.compile(r"\bjira\b|ticket|issue|bug|缺陷", re.IGNORECASE),
-    "confluence": re.compile(r"\bconfluence\b|wiki|知识库页面", re.IGNORECASE),
+    "google_drive": re.compile(r"\bgoogle drive\b|drive 文档|共享文档", re.IGNORECASE),
+    "hubspot": re.compile(r"\bhubspot\b|客户记录|\baccount notes\b", re.IGNORECASE),
+    "fireflies": re.compile(r"\bfireflies\b|会议转录|\bmeeting transcript\b", re.IGNORECASE),
+    "github": re.compile(r"\bgithub\b|\bpull request\b|\bpr\b|\bcommit\b|\brepo\b|代码", re.IGNORECASE),
+    "jira": re.compile(r"\bjira\b|\bticket\b|\bissue\b|\bbug\b|缺陷", re.IGNORECASE),
+    "confluence": re.compile(r"\bconfluence\b|\bwiki\b|知识库页面", re.IGNORECASE),
 }
 
 SEMANTIC_PATTERNS = {
-    "policy_rule": re.compile(r"policy|rule|sop|规定|政策|制度|合规|报销|pto", re.IGNORECASE),
-    "playbook": re.compile(r"playbook|runbook|操作手册|应急手册|流程手册", re.IGNORECASE),
-    "meeting_notes": re.compile(r"meeting notes|会议记录|纪要|meeting", re.IGNORECASE),
-    "email_thread": re.compile(r"email thread|邮件线程|邮件", re.IGNORECASE),
-    "chat_thread": re.compile(r"chat thread|聊天记录|slack thread|讨论串", re.IGNORECASE),
-    "issue_ticket": re.compile(r"ticket|issue|bug|incident|工单|缺陷|事故", re.IGNORECASE),
-    "code_change": re.compile(r"pull request|\bpr\b|commit|diff|代码变更|repo", re.IGNORECASE),
-    "account_notes": re.compile(r"account notes|客户记录|客户备注|crm", re.IGNORECASE),
+    "policy_rule": re.compile(r"\bpolicy\b|\brule\b|\bsop\b|规定|政策|制度|合规|报销|\bpto\b", re.IGNORECASE),
+    "playbook": re.compile(r"\bplaybook\b|\brunbook\b|操作手册|应急手册|流程手册", re.IGNORECASE),
+    "meeting_notes": re.compile(r"\bmeeting notes\b|会议记录|纪要|\bmeeting\b", re.IGNORECASE),
+    "email_thread": re.compile(r"\bemail thread\b|邮件线程|邮件", re.IGNORECASE),
+    "chat_thread": re.compile(r"\bchat thread\b|聊天记录|\bslack thread\b|讨论串", re.IGNORECASE),
+    "issue_ticket": re.compile(r"\bticket\b|\bissue\b|\bbug\b|\bincident\b|工单|缺陷|事故", re.IGNORECASE),
+    "code_change": re.compile(r"\bpull request\b|\bpr\b|\bcommit\b|\bdiff\b|代码变更|\brepo\b", re.IGNORECASE),
+    "account_notes": re.compile(r"\baccount notes\b|客户记录|客户备注|\bcrm\b", re.IGNORECASE),
 }
 
 BROAD_INTENTS = {"multi_hop", "comparison", "completeness", "conflicting_info"}
+
+
+def _normalize_metadata_value(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
 
 
 def _dedupe_allowed(values: list[str], allowed: set[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
-        normalized = value.strip().lower()
+        normalized = _normalize_metadata_value(value)
         if normalized in allowed and normalized not in seen:
             seen.add(normalized)
             result.append(normalized)

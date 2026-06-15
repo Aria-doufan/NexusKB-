@@ -48,3 +48,45 @@ def test_planner_normalizes_router_source_hints_to_soft_filter():
     assert decision.mode == "soft"
     assert decision.source_types == ["slack"]
     assert decision.doc_semantic_types == []
+
+
+def test_planner_does_not_match_repo_inside_report_or_commit_inside_commitment():
+    from app.rag.metadata_filter_planner import plan_metadata_filter
+
+    report_decision = plan_metadata_filter("Find the Confluence report", rag_intent="constrained", source_hints=[])
+    commitment_decision = plan_metadata_filter("Find the customer commitment policy", rag_intent="constrained", source_hints=[])
+
+    assert report_decision.source_types == ["confluence"]
+    assert report_decision.doc_semantic_types == []
+    assert report_decision.mode == "soft"
+    assert commitment_decision.source_types == []
+    assert commitment_decision.doc_semantic_types == ["policy_rule"]
+    assert commitment_decision.mode == "soft"
+
+
+def test_planner_normalizes_source_hint_aliases_and_dedupes_values():
+    from app.rag.metadata_filter_planner import plan_metadata_filter
+
+    decision = plan_metadata_filter(
+        "Where was the roadmap discussed?",
+        rag_intent="semantic_query",
+        source_hints=["Google Drive", "google-drive", "GOOGLE_DRIVE", "unknown"],
+    )
+
+    assert decision.mode == "soft"
+    assert decision.source_types == ["google_drive"]
+    assert decision.doc_semantic_types == []
+
+
+def test_planner_accepts_google_drive_source_hint_without_underscore_form():
+    from app.rag.metadata_filter_planner import plan_metadata_filter
+
+    decision = plan_metadata_filter(
+        "Where was the roadmap discussed?",
+        rag_intent="semantic_query",
+        source_hints=["Google Drive", "google-drive", "unknown"],
+    )
+
+    assert decision.mode == "soft"
+    assert decision.source_types == ["google_drive"]
+    assert decision.doc_semantic_types == []
