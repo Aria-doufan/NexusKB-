@@ -634,6 +634,7 @@ WebSearch 通用公开参考：
             blocks.append(
                 f"【资料{index}】\n"
                 f"source_type: {data.get('source_type', getattr(document, 'source_type', ''))}\n"
+                f"doc_semantic_type: {(data.get('metadata') or {}).get('doc_semantic_type', getattr(document, 'metadata', {}).get('doc_semantic_type', ''))}\n"
                 f"title: {data.get('title', getattr(document, 'title', ''))}\n"
                 f"section: {data.get('section_heading', getattr(document, 'section_heading', ''))}\n"
                 f"parent_doc_id: {data.get('parent_doc_id', getattr(document, 'parent_doc_id', ''))}\n"

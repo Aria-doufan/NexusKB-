@@ -64,3 +64,24 @@ async def test_retrieval_pipeline_passes_metadata_filter_and_records_it():
     assert result.attempt.metadata_filter.mode == "hard"
     assert result.attempt.metadata_filter.source_types == ["confluence"]
     assert result.selected_documents[0].metadata["doc_semantic_type"] == "policy_rule"
+
+
+def test_pipeline_preserves_doc_semantic_type_for_context_display():
+    from app.rag.retrieval_pipeline import RetrievalPipeline
+
+    pipeline = RetrievalPipeline(service=None)
+    document = pipeline._to_rag_document(
+        {
+            "parent_chunk_id": "p1",
+            "parent_doc_id": "d1",
+            "source_type": "confluence",
+            "title": "PTO Policy",
+            "section_heading": "Eligibility",
+            "score": 1.0,
+            "parent_text": "PTO policy text",
+            "child_text": "PTO child text",
+            "metadata": {"doc_semantic_type": "policy_rule"},
+        }
+    )
+
+    assert document.metadata["doc_semantic_type"] == "policy_rule"
