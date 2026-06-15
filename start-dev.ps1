@@ -1,5 +1,6 @@
 param(
     [switch]$Migrate,
+    [switch]$SkipElasticsearch,
     [string]$CondaEnv = "nexuskb",
     [string]$RedisServerPath = "D:\Tools\Redis-7.4.8-Windows-x64-msys2\redis-server.exe"
 )
@@ -10,6 +11,7 @@ $ProjectRoot = $PSScriptRoot
 $DjangoDir = Join-Path $ProjectRoot "DjangoUserService"
 $BackendDir = Join-Path $ProjectRoot "backend"
 $FrontendDir = Join-Path $ProjectRoot "front"
+$ElasticsearchComposeFile = Join-Path $ProjectRoot "docker-compose.elasticsearch.yml"
 $VenvActivate = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
 
 function Test-RequiredPath {
@@ -141,6 +143,45 @@ function Wait-PortListening {
     return $false
 }
 
+function Test-DockerComposeAvailable {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    $output = & docker compose version 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Start-ElasticsearchIfNeeded {
+    if ($SkipElasticsearch) {
+        Write-Host "Skipping Elasticsearch Docker startup." -ForegroundColor Yellow
+        return
+    }
+
+    if (Test-PortListening 9200) {
+        Write-Host "Elasticsearch is already listening on port 9200." -ForegroundColor Green
+        return
+    }
+
+    Test-RequiredPath $ElasticsearchComposeFile "Elasticsearch Docker Compose file"
+
+    if (-not (Test-DockerComposeAvailable)) {
+        throw "Docker Compose is not available. Start Docker Desktop and ensure 'docker compose version' works, or rerun with -SkipElasticsearch."
+    }
+
+    Write-Host "Starting Elasticsearch with Docker Compose..." -ForegroundColor Cyan
+    & docker compose -f $ElasticsearchComposeFile up -d
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start Elasticsearch with Docker Compose. Check Docker Desktop and docker-compose.elasticsearch.yml, or rerun with -SkipElasticsearch."
+    }
+
+    if (-not (Wait-PortListening -Port 9200 -TimeoutSeconds 60)) {
+        throw "Elasticsearch did not start listening on port 9200 within 60 seconds. Check 'docker compose -f docker-compose.elasticsearch.yml logs elasticsearch'."
+    }
+
+    Write-Host "Elasticsearch is listening on port 9200." -ForegroundColor Green
+}
+
 function Start-RedisIfNeeded {
     if (Test-PortListening 6379) {
         Write-Host "Redis is already listening on port 6379." -ForegroundColor Green
@@ -187,6 +228,9 @@ function Test-ProjectPreflight {
     Test-RequiredPath $DjangoDir "Django service directory"
     Test-RequiredPath $BackendDir "FastAPI backend directory"
     Test-RequiredPath $FrontendDir "Frontend directory"
+    if (-not $SkipElasticsearch) {
+        Test-RequiredPath $ElasticsearchComposeFile "Elasticsearch Docker Compose file"
+    }
 
     Test-RequiredCommand "npm" "Install Node.js, then run npm install in the front directory."
 
@@ -229,6 +273,7 @@ if (-not [string]::IsNullOrWhiteSpace($CondaEnv)) {
     Write-Host "Using Python executable: $Script:PythonExecutable" -ForegroundColor Cyan
 }
 Write-Host "MySQL is listening on port 3306." -ForegroundColor Green
+Start-ElasticsearchIfNeeded
 Start-RedisIfNeeded
 
 $djangoCommands = @()
@@ -245,6 +290,6 @@ Start-ServiceWindow -Title "NexusKB Django :8001" -Command $djangoCommand
 Start-ServiceWindow -Title "NexusKB FastAPI :8000" -Command $backendCommand
 Start-ServiceWindow -Title "NexusKB Frontend :3000" -Command $frontendCommand
 
-Write-Host "Started Django, FastAPI, and frontend in separate PowerShell windows." -ForegroundColor Green
+Write-Host "Started development services in separate PowerShell windows." -ForegroundColor Green
 Write-Host "Frontend: http://127.0.0.1:3000" -ForegroundColor Green
 Write-Host "FastAPI docs: http://127.0.0.1:8000/docs" -ForegroundColor Green
