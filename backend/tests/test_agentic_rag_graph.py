@@ -50,6 +50,42 @@ def test_agentic_rag_state_defaults_support_single_graph_actions():
     assert tool_result.success is True
 
 
+def test_rag_state_tracks_metadata_filter_decision_defaults():
+    from app.schemas.rag import MetadataFilterDecision, RagState, RetrievalAttempt
+
+    state = RagState(
+        request_id="req-filter-defaults",
+        debug_id="dbg-filter-defaults",
+        user_id="user-1",
+        original_query="Find the Confluence policy",
+        current_query="Find the Confluence policy",
+    )
+
+    assert state.metadata_filter_decision.mode == "none"
+    assert state.metadata_filter_decision.source_types == []
+    assert state.metadata_filter_decision.doc_semantic_types == []
+    assert state.metadata_filter_decision.confidence == 0.0
+    assert state.metadata_filter_fallback_count == 0
+
+    decision = MetadataFilterDecision(
+        mode="hard",
+        source_types=["confluence"],
+        doc_semantic_types=["policy_rule"],
+        confidence=0.91,
+        reason="The query explicitly asks for a Confluence policy.",
+    )
+    assert decision.mode == "hard"
+    assert decision.source_types == ["confluence"]
+    assert decision.doc_semantic_types == ["policy_rule"]
+
+    attempt = RetrievalAttempt(
+        attempt_id=1,
+        query="Find the Confluence policy",
+        metadata_filter=decision,
+    )
+    assert attempt.metadata_filter.mode == "hard"
+
+
 def test_agentic_rag_graph_is_not_enterprise_rag_graph_subclass():
     from app.rag.agentic_rag_graph import AgenticRagGraph
     from app.rag.enterprise_rag_graph import EnterpriseRagGraph

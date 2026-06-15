@@ -53,6 +53,7 @@ class RagMemoryContext(BaseModel):
 class RagStrategyConfig(BaseModel):
     strategy_name: str = "default"
     retrieval_mode: str = "hybrid"
+    metadata_filter_mode: Literal["none", "soft", "hard"] = "none"
     top_k_dense: int = Field(default=40, ge=0)
     top_k_bm25: int = Field(default=40, ge=0)
     fusion_top_k: int = Field(default=40, ge=0)
@@ -103,11 +104,26 @@ class ExternalSearchDecision(BaseModel):
     user_visible_label: str = ""
 
 
+class MetadataFilterDecision(BaseModel):
+    mode: Literal["none", "soft", "hard"] = "none"
+    source_types: list[str] = Field(default_factory=list)
+    doc_semantic_types: list[str] = Field(default_factory=list)
+    title_keywords: list[str] = Field(default_factory=list)
+    section_keywords: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+
+    @property
+    def has_filters(self) -> bool:
+        return bool(self.source_types or self.doc_semantic_types or self.title_keywords or self.section_keywords)
+
+
 class RetrievalAttempt(BaseModel):
     attempt_id: int = Field(ge=1)
     query: str = Field(min_length=1)
     sub_query_id: str | None = None
     strategy_name: str = "default"
+    metadata_filter: MetadataFilterDecision = Field(default_factory=MetadataFilterDecision)
     dense_results: list[RagCandidate] = Field(default_factory=list)
     bm25_results: list[RagCandidate] = Field(default_factory=list)
     fused_results: list[RagCandidate] = Field(default_factory=list)
@@ -273,6 +289,8 @@ class RagState(BaseModel):
     route: str = "enterprise_knowledge"
     rag_intent: str = "unknown"
     source_hints: list[str] = Field(default_factory=list)
+    metadata_filter_decision: MetadataFilterDecision = Field(default_factory=MetadataFilterDecision)
+    metadata_filter_fallback_count: int = Field(default=0, ge=0)
     router_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     router_reason: str = ""
     history: list[tuple[str, str]] = Field(default_factory=list)
