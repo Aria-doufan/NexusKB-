@@ -45,6 +45,8 @@ from scripts.rag_eval_metrics import (
     reciprocal_rank_at_k,
 )
 from scripts.rag_eval_reporting import load_json_if_exists, render_retrieval_report, short_git_commit, utc_run_id
+from app.rag.metadata_filter_planner import ALLOWED_DOC_SEMANTIC_TYPES, ALLOWED_SOURCE_TYPES
+from app.schemas.rag import MetadataFilterDecision
 
 
 DEFAULT_QUESTIONS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "questions.jsonl"
@@ -231,6 +233,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional single source_type metadata filter. Keep empty for comparable experiments.",
     )
+    parser.add_argument("--metadata-filter-mode", choices=["none", "soft", "hard"], default="none")
+    parser.add_argument("--filter-source-types", default="")
+    parser.add_argument("--filter-doc-semantic-types", default="")
     parser.add_argument("--reranker-model-path", default=os.getenv("RERANKER_MODEL_PATH", DEFAULT_RERANKER_MODEL_PATH))
     parser.add_argument("--reranker-device", default=None, help="Optional device override, for example cpu or cuda.")
     parser.add_argument("--reranker-max-length", type=int, default=512)
@@ -286,6 +291,32 @@ def parse_k_values(raw: str) -> list[int]:
     if not values or any(value <= 0 for value in values):
         raise ValueError("--k-values must contain positive integers")
     return values
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip().lower() for item in value.split(",") if item.strip()]
+
+
+def build_metadata_filter_decision(filter_mode: str, source_types: str, doc_semantic_types: str) -> MetadataFilterDecision:
+    sources = _split_csv(source_types)
+    semantic_types = _split_csv(doc_semantic_types)
+    for source_type in sources:
+        if source_type not in ALLOWED_SOURCE_TYPES:
+            raise ValueError(f"Unsupported source_type for metadata filter: {source_type}")
+    for semantic_type in semantic_types:
+        if semantic_type not in ALLOWED_DOC_SEMANTIC_TYPES:
+            raise ValueError(f"Unsupported doc_semantic_type for metadata filter: {semantic_type}")
+    if filter_mode == "none":
+        return MetadataFilterDecision(mode="none")
+    if not sources and not semantic_types:
+        raise ValueError("--metadata-filter-mode requires --filter-source-types or --filter-doc-semantic-types when mode is soft or hard")
+    return MetadataFilterDecision(
+        mode=filter_mode,
+        source_types=sources,
+        doc_semantic_types=semantic_types,
+        confidence=1.0,
+        reason="Manual evaluation metadata filter.",
+    )
 
 
 def normalize_method(method: str) -> str:
@@ -875,6 +906,7 @@ def evaluate_question(
     graph_depth: int = 1,
     backend: str = "chroma",
     retrieval_backend: Any | None = None,
+    metadata_filter: MetadataFilterDecision | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     normalized_method = normalize_method(method)
@@ -897,6 +929,7 @@ def evaluate_question(
                 fusion_top_k=max(dense_top_k, lexical_top_k, max(k_values)),
                 source_hints=question.source_types if should_apply_source_boost(normalized_method) else None,
                 use_reranker=False,
+                metadata_filter=metadata_filter,
             )
         )
         ranked_candidates = [candidate_from_backend_document(row) for row in raw["selected_documents"]]
@@ -1327,6 +1360,7 @@ def write_standard_retrieval_outputs(
     details: list[dict[str, Any]],
     failures: list[dict[str, Any]],
     k_values: list[int],
+    metadata_filter: MetadataFilterDecision,
 ) -> Path:
     run_dir = args.run_output_root / utc_run_id("retrieval")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1346,6 +1380,7 @@ def write_standard_retrieval_outputs(
         "graph_dir": str(args.graph_dir) if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
         "graph_search_k": args.graph_search_k if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
         "graph_depth": args.graph_depth if args.backend == "chroma" and method_needs_graph(normalize_method(args.method)) else None,
+        "metadata_filter": metadata_filter.model_dump(),
         "judge_provider": None,
         "judge_model": None,
         "ci": args.ci,
@@ -1374,6 +1409,13 @@ def main() -> None:
     normalized_method = normalize_method(args.method)
     validate_graph_cli_args(args, normalized_method)
     k_values = parse_k_values(args.k_values)
+    metadata_filter = build_metadata_filter_decision(
+        args.metadata_filter_mode,
+        args.filter_source_types,
+        args.filter_doc_semantic_types,
+    )
+    if args.backend != "elasticsearch" and args.metadata_filter_mode != "none":
+        raise ValueError("Metadata filter evaluation flags are only supported with --backend elasticsearch")
     questions = load_questions(args.questions_path, args.limit)
     doc_semantic_types_by_doc_id = load_doc_semantic_types_by_doc_id(args.parent_chunks_path)
     if not questions:
@@ -1463,6 +1505,7 @@ def main() -> None:
             graph_depth=args.graph_depth,
             backend=args.backend,
             retrieval_backend=retrieval_backend,
+            metadata_filter=metadata_filter,
         )
         detail["expected_doc_semantic_type_by_doc_id"] = {
             expected_doc_id: doc_semantic_types_by_doc_id.get(expected_doc_id, "generic_doc")
@@ -1514,7 +1557,7 @@ def main() -> None:
     )
     write_outputs(args.output_dir, args.method, summary, details, k_values)
     if args.standard_output:
-        run_dir = write_standard_retrieval_outputs(args, summary, details, failures, k_values)
+        run_dir = write_standard_retrieval_outputs(args, summary, details, failures, k_values, metadata_filter)
         print(f"Wrote standard retrieval outputs to {run_dir}")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
