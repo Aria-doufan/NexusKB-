@@ -213,6 +213,17 @@ Semantic chunking backend comparison:
 
 Elasticsearch keeps `recall@10` effectively at parity with Chroma while improving `hit@5`, `mrr@20`, and `ndcg@10`. The trade-off is higher latency, so Chroma remains useful for local low-latency baselines while Elasticsearch becomes the default enterprise retrieval backend. Keep reranker comparisons separate until Elasticsearch evaluation supports `--backend elasticsearch` with reranking.
 
+### Metadata Filter Experiments
+
+Metadata filters are agentic retrieval controls, not universal defaults. Hard filters narrow ES kNN/BM25 candidates by whitelisted metadata fields; soft filters keep global recall and boost matching source/type candidates during fusion.
+
+| Mode | Filter | questions | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms | Interpretation |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| none | none | 500 | 0.9176 | 0.926 | 0.8753 | 0.8764 | 358.58 | Default ES baseline. |
+| hard | doc_semantic_type=policy_rule | 500 | 0.2198 | 0.272 | 0.2598 | 0.2227 | 402.61 | Use only when the user explicitly asks for policy/rule evidence. |
+| soft | doc_semantic_type=policy_rule | 500 | 0.9134 | 0.914 | 0.8345 | 0.8437 | 351.7 | Safer default for implied policy/rule questions. |
+| hard | source_type=confluence | 50 | 0.2 | 0.2 | 0.19 | 0.1926 | 394.56 | Smoke test for hard source filter mechanics. |
+
 ## 5. 检索指标公式
 
 ### 5.1 Hit@K
