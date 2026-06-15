@@ -14,6 +14,7 @@ def test_build_mapping_contains_text_keyword_and_dense_vector_fields():
     assert props["chunk_id"]["type"] == "keyword"
     assert props["parent_doc_id"]["type"] == "keyword"
     assert props["source_type"]["type"] == "keyword"
+    assert props["doc_semantic_type"]["type"] == "keyword"
     assert props["child_text"]["type"] == "text"
     assert props["parent_text"]["type"] == "text"
     assert props["embedding"]["type"] == "dense_vector"
@@ -27,6 +28,7 @@ def test_chunk_to_es_document_joins_parent_text(tmp_path):
             "text": "parent text",
             "parent_doc_id": "doc-1",
             "source_type": "policy",
+            "doc_semantic_type": "policy_rule",
             "title": "Policy",
             "section_heading": "Section",
         }
@@ -36,6 +38,7 @@ def test_chunk_to_es_document_joins_parent_text(tmp_path):
         "parent_chunk_id": "parent-1",
         "parent_doc_id": "doc-1",
         "source_type": "policy",
+        "doc_semantic_type": "policy_rule",
         "title": "Policy",
         "section_heading": "Section",
         "text": "child text",
@@ -48,6 +51,7 @@ def test_chunk_to_es_document_joins_parent_text(tmp_path):
 
     assert document["chunk_id"] == "child-1"
     assert document["parent_chunk_id"] == "parent-1"
+    assert document["doc_semantic_type"] == "policy_rule"
     assert document["child_text"] == "child text"
     assert document["parent_text"] == "parent text"
     assert document["embedding"] == [0.1, 0.2]

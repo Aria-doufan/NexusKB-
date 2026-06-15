@@ -128,50 +128,61 @@ Report delta comparison defaults:
 
 Use `backend/scripts/evaluate_enterprise_chunking_profiles.py` to compare parent-child chunking profiles for the enterprise corpus without changing online Agentic RAG behavior. This chunking track is Chroma-only: Elasticsearch is intentionally excluded until a Chroma winner exists, so chunk-size and boundary effects are isolated before adding a second retrieval backend.
 
-All profiles in a stage must share the same sample fingerprint: `sample_size`, `seed`, document count/hash, and question count/hash. The runner writes the stage fingerprint to `sample_fingerprint.json` and rejects comparisons where profiles were prepared from different document/question samples.
+All profiles in a stage must share the same sample fingerprint: `sample_size`, `seed`, document count/hash, and question count/hash. The runner writes the stage fingerprint to `sample_fingerprint.json` and rejects comparisons where profiles were prepared from different document/question samples. In this script, `--sample-size` controls document sampling; use `--limit` to cap evaluated questions.
 
 Primary metrics are `recall@10`, `evidence_coverage@10`, and `hit@5`. Secondary checks are `mrr@20`, `ndcg@10`, latency, total child chunks, and semantic-type breakdowns when available.
 
-Primary Stage 1 command:
+Current comparable run command:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 10000 --seed 42
+conda run --no-capture-output -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 100 --seed 42
 ```
 
 Smoke command:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 25 --seed 42 --limit 5
+conda run --no-capture-output -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage1 --method chroma_bm25_rrf --sample-size 25 --seed 42 --limit 5
 ```
 
 Stage 1 compares fixed-size recursive child chunking profiles:
 
-| Profile | Boundary mode | Parent size / overlap | Child size / overlap |
-| --- | --- | ---: | ---: |
-| `fixed_baseline` | `recursive` | `3000 / 300` | `700 / 100` |
-| `fixed_smaller_child` | `recursive` | `3000 / 300` | `500 / 80` |
-| `fixed_larger_child` | `recursive` | `3000 / 300` | `900 / 120` |
-| `fixed_larger_parent` | `recursive` | `4000 / 400` | `700 / 100` |
+| Profile | Boundary mode | Parent size / overlap | Child size / overlap | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms | child chunks |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fixed_baseline` | `recursive` | `3000 / 300` | `700 / 100` | 0.9158 | 0.918 | 0.8551 | 0.8598 | 226.16 | 12011 |
+| `fixed_smaller_child` | `recursive` | `3000 / 300` | `500 / 80` | 0.9128 | 0.908 | 0.8341 | 0.8434 | 260.92 | 16473 |
+| `fixed_larger_child` | `recursive` | `3000 / 300` | `900 / 120` | 0.9192 | 0.908 | 0.8555 | 0.8613 | 227.04 | 9527 |
+| `fixed_larger_parent` | `recursive` | `4000 / 400` | `700 / 100` | 0.9114 | 0.904 | 0.8494 | 0.8542 | 230.53 | 11588 |
 
-After Stage 1 selects the strongest fixed-size baseline, Stage 2 compares semantic-boundary child chunking profiles:
-
-| Profile | Boundary mode | Parent size / overlap | Child size / overlap |
-| --- | --- | ---: | ---: |
-| `semantic_baseline_threshold` | `semantic` | `3000 / 300` | `700 / 100` |
-| `semantic_smaller_child` | `semantic` | `3000 / 300` | `500 / 80` |
-| `semantic_larger_child` | `semantic` | `3000 / 300` | `900 / 120` |
-
-Run Stage 2 with the same sampling controls once Stage 1 has a winner:
+Stage 2 compares semantic-boundary child chunking profiles with the same sample fingerprint:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage2_semantic --method chroma_bm25_rrf --sample-size 10000 --seed 42
+conda run --no-capture-output -n NexusKB python backend/scripts/evaluate_enterprise_chunking_profiles.py --stage stage2_semantic --method chroma_bm25_rrf --sample-size 100 --seed 42
 ```
+
+| Profile | Boundary mode | Parent size / overlap | Child size / overlap | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms | child chunks |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `semantic_baseline_threshold` | `semantic` | `3000 / 300` | `700 / 100` | 0.9179 | 0.914 | 0.8593 | 0.8638 | 252.91 | 10842 |
+| `semantic_smaller_child` | `semantic` | `3000 / 300` | `500 / 80` | 0.9140 | 0.908 | 0.8384 | 0.8465 | 259.11 | 14884 |
+| `semantic_larger_child` | `semantic` | `3000 / 300` | `900 / 120` | 0.9135 | 0.904 | 0.8564 | 0.8615 | 249.11 | 8702 |
+
+The Stage 1 and Stage 2 comparable runs used `sample_size=100`, `seed=42`, `documents_count=722`, and `questions_count=500`.
+
+Current selection: `semantic_baseline_threshold` with Elasticsearch-backed `chroma_bm25_rrf` is the selected retrieval configuration. The semantic chunking profile slightly trails `fixed_larger_child` on Chroma-only `recall@10` and latency, but improves ranking quality (`mrr@20` and `ndcg@10`) and better represents the semantic-boundary chunking direction of the project. Elasticsearch is the default enterprise retrieval backend going forward; Chroma remains the lower-latency local baseline.
+
+Reranker check on `fixed_larger_child`:
+
+| Method | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `chroma_bm25_rrf` | 0.9192 | 0.908 | 0.8555 | 0.8613 | 227.04 |
+| `chroma_bm25_rrf_reranker` | 0.9075 | 0.906 | 0.8642 | 0.8636 | 836.21 |
+
+The reranker improves ranking metrics slightly but reduces `recall@10` and increases latency by roughly 3.7x, so it remains an optional ranking-sensitive experiment rather than the default retrieval path.
 
 Outputs are written under `backend/data/chunking_eval_outputs/<stage>/`, including one `run_record.json` per profile, `comparison_summary.json`, `sample_fingerprint.json`, and a stage-level `report.md` titled `Enterprise Chroma Chunking Evaluation Report`. The record format includes `source_type` so future uploaded-document RAG evaluation can reuse the same schema after its query set and expected evidence labels exist.
 
 ## Elasticsearch Enterprise Retrieval Backend
 
-NexusKB can evaluate Elasticsearch as an enterprise retrieval backend while keeping Chroma as the default baseline.
+Elasticsearch is the selected default enterprise retrieval backend for the chosen `semantic_baseline_threshold` chunking profile. Chroma remains the local lower-latency baseline, but ES is the default backend for enterprise-oriented evaluation and documentation because it preserves recall parity while improving top-rank retrieval quality.
 
 Start local Elasticsearch:
 
@@ -179,31 +190,28 @@ Start local Elasticsearch:
 docker compose -f docker-compose.elasticsearch.yml up -d
 ```
 
-Smoke-test Elasticsearch indexing with a small sample:
+Index the selected semantic chunks into Elasticsearch with `--reset`:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/index_enterprise_chunks_elasticsearch.py --reset --limit 100
+conda run --no-capture-output -n NexusKB python backend/scripts/index_enterprise_chunks_elasticsearch.py --child-chunks-path backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/child_chunks_parent_child.jsonl --parent-chunks-path backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/parent_chunks_parent_child.jsonl --index-name nexuskb_enterprise_chunks --reset
 ```
 
-For comparable backend evaluation, index the full enterprise chunk set first:
+The full semantic ES indexing run wrote 10,842 chunks and stores both `source_type` and `doc_semantic_type` as keyword metadata alongside dense vectors.
+
+Run Elasticsearch evaluation on the same selected semantic sample:
 
 ```powershell
-conda run -n NexusKB python backend/scripts/index_enterprise_chunks_elasticsearch.py --reset
+conda run --no-capture-output -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --backend elasticsearch --method chroma_bm25_rrf --questions-path backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/questions.jsonl --child-chunks-path backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/child_chunks_parent_child.jsonl --parent-chunks-path backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/parent_chunks_parent_child.jsonl --output-dir backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/eval_es --k-values 1,5,10,20
 ```
 
-Run Chroma baseline evaluation with the same retrieval method:
+Semantic chunking backend comparison:
 
-```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --method chroma_bm25_rrf --limit 20
-```
+| Backend | questions | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Chroma | 500 | 0.9179 | 0.914 | 0.8593 | 0.8638 | 252.91 |
+| Elasticsearch | 500 | 0.9176 | 0.926 | 0.8753 | 0.8764 | 358.58 |
 
-Run Elasticsearch evaluation:
-
-```powershell
-conda run -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --backend elasticsearch --method chroma_bm25_rrf --limit 20
-```
-
-Compare `recall@10`, `evidence_coverage@10`, `hit@5`, `mrr@20`, `ndcg@10`, and `average_latency_ms` before changing the default backend. Keep reranker comparisons separate until Elasticsearch evaluation supports `--backend elasticsearch` with reranking.
+Elasticsearch keeps `recall@10` effectively at parity with Chroma while improving `hit@5`, `mrr@20`, and `ndcg@10`. The trade-off is higher latency, so Chroma remains useful for local low-latency baselines while Elasticsearch becomes the default enterprise retrieval backend. Keep reranker comparisons separate until Elasticsearch evaluation supports `--backend elasticsearch` with reranking.
 
 ## 5. 检索指标公式
 
