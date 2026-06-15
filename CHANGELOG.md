@@ -13,3 +13,4 @@
 - 发布 GitHub Release `v0.3.0`。
 - 更新 GitHub README 首页，重写项目定位、核心能力、评估结果、Elasticsearch 启动说明和后续方向。
 - 更新项目框架图 `docs/assets/system-architecture.png`，补充 Agentic RAG、Elasticsearch、metadata filter 和评估闭环。
+- 替换项目框架图 PNG 为新版视觉稿。
