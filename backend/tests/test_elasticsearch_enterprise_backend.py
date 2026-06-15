@@ -24,14 +24,14 @@ class FakeElasticsearchClient:
             return {
                 "hits": {
                     "hits": [
-                        {"_score": 0.9, "_source": {"parent_chunk_id": "p1", "parent_doc_id": "d1", "source_type": "policy", "title": "Policy", "section_heading": "A", "child_text": "child", "parent_text": "parent"}}
+                        {"_score": 0.9, "_source": {"parent_chunk_id": "p1", "parent_doc_id": "d1", "source_type": "policy", "doc_semantic_type": "policy_rule", "title": "Policy", "section_heading": "A", "child_text": "child", "parent_text": "parent"}}
                     ]
                 }
             }
         return {
             "hits": {
                 "hits": [
-                    {"_score": 3.0, "_source": {"parent_chunk_id": "p2", "parent_doc_id": "d2", "source_type": "faq", "title": "FAQ", "section_heading": "B", "child_text": "child 2", "parent_text": "parent 2"}}
+                    {"_score": 3.0, "_source": {"parent_chunk_id": "p2", "parent_doc_id": "d2", "source_type": "faq", "doc_semantic_type": "generic_doc", "title": "FAQ", "section_heading": "B", "child_text": "child 2", "parent_text": "parent 2"}}
                 ]
             }
         }
@@ -60,7 +60,7 @@ def test_elasticsearch_backend_returns_standard_result_shape():
         )
     )
 
-    assert set(result) == {"dense_results", "bm25_results", "fused_results", "reranked_results", "selected_documents", "metrics"}
+    assert set(result) == {"dense_results", "bm25_results", "fused_results", "reranked_results", "selected_documents", "metadata_filter", "metrics"}
     assert result["dense_results"][0]["parent_chunk_id"] == "p1"
     assert result["dense_results"][0]["score"] == 0.9
     assert result["bm25_results"][0]["parent_chunk_id"] == "p2"
@@ -116,3 +116,91 @@ def test_elasticsearch_backend_uses_configurable_rrf_parameters():
     result = asyncio.run(backend.retrieve_with_details("policy", 2, 5, 5, 5, ["policy"], False))
 
     assert round(result["fused_results"][0]["score"], 6) == round(1 / 11, 6)
+
+
+def test_elasticsearch_backend_applies_hard_metadata_filter_to_knn_and_bm25_queries():
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    client = FakeElasticsearchClient()
+    backend = ElasticsearchEnterpriseRetrievalBackend(client=client, embeddings=FakeEmbeddings(), index_name="idx")
+
+    import asyncio
+
+    asyncio.run(
+        backend.retrieve_with_details(
+            query="Confluence PTO policy",
+            final_top_k=2,
+            dense_top_k=5,
+            bm25_top_k=5,
+            fusion_top_k=5,
+            source_hints=[],
+            use_reranker=False,
+            metadata_filter=MetadataFilterDecision(
+                mode="hard",
+                source_types=["confluence"],
+                doc_semantic_types=["policy_rule"],
+                confidence=0.9,
+            ),
+        )
+    )
+
+    knn = client.search_calls[0]["body"]["knn"]
+    bm25_query = client.search_calls[1]["body"]["query"]
+    assert knn["filter"] == {
+        "bool": {
+            "filter": [
+                {"terms": {"source_type": ["confluence"]}},
+                {"terms": {"doc_semantic_type": ["policy_rule"]}},
+            ]
+        }
+    }
+    assert bm25_query["bool"]["filter"] == [
+        {"terms": {"source_type": ["confluence"]}},
+        {"terms": {"doc_semantic_type": ["policy_rule"]}},
+    ]
+
+
+def test_elasticsearch_backend_soft_filter_boosts_matching_metadata_without_query_filter():
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    client = FakeElasticsearchClient()
+    backend = ElasticsearchEnterpriseRetrievalBackend(
+        client=client,
+        embeddings=FakeEmbeddings(),
+        index_name="idx",
+        source_hint_soft_boost=0.2,
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        backend.retrieve_with_details(
+            query="PTO policy",
+            final_top_k=2,
+            dense_top_k=5,
+            bm25_top_k=5,
+            fusion_top_k=5,
+            source_hints=[],
+            use_reranker=False,
+            metadata_filter=MetadataFilterDecision(
+                mode="soft",
+                doc_semantic_types=["policy_rule"],
+                confidence=0.65,
+            ),
+        )
+    )
+
+    assert "filter" not in client.search_calls[0]["body"]["knn"]
+    assert "bool" not in client.search_calls[1]["body"]["query"]
+    assert result["fused_results"][0]["parent_chunk_id"] == "p1"
+    assert result["metadata_filter"] == {
+        "mode": "soft",
+        "source_types": [],
+        "doc_semantic_types": ["policy_rule"],
+        "title_keywords": [],
+        "section_keywords": [],
+        "confidence": 0.65,
+        "reason": "",
+    }

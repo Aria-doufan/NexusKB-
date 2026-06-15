@@ -10,6 +10,7 @@ from langchain_ollama import OllamaEmbeddings
 
 from app.rag.enterprise_rag_service import EnterpriseRetrievedDocument, RRF_K, SOURCE_HINT_SOFT_BOOST
 from app.rag.reorder_service import reorder_service
+from app.schemas.rag import MetadataFilterDecision
 
 
 class ElasticsearchEnterpriseRetrievalBackend:
@@ -55,16 +56,17 @@ class ElasticsearchEnterpriseRetrievalBackend:
         fusion_top_k: int,
         source_hints: list[str] | None = None,
         use_reranker: bool = False,
+        metadata_filter: MetadataFilterDecision | None = None,
     ) -> dict[str, Any]:
         started = perf_counter()
         metrics: dict[str, float] = {}
 
         step = perf_counter()
-        dense_documents = await self._dense_search(query, dense_top_k)
+        dense_documents = await self._dense_search(query, dense_top_k, metadata_filter)
         metrics["dense_ms"] = (perf_counter() - step) * 1000
 
         step = perf_counter()
-        bm25_documents = await self._bm25_search(query, bm25_top_k)
+        bm25_documents = await self._bm25_search(query, bm25_top_k, metadata_filter)
         metrics["bm25_ms"] = (perf_counter() - step) * 1000
 
         step = perf_counter()
@@ -81,6 +83,7 @@ class ElasticsearchEnterpriseRetrievalBackend:
             candidates=candidates,
             rrf_k=self.rrf_k,
             source_hint_soft_boost=self.source_hint_soft_boost,
+            metadata_filter=metadata_filter,
         )
         fused_documents = [
             replace(candidates[parent_chunk_id], score=score)
@@ -105,31 +108,66 @@ class ElasticsearchEnterpriseRetrievalBackend:
             "fused_results": [document.to_dict() for document in fused_documents],
             "reranked_results": [document.to_dict() for document in reranked_documents] if use_reranker else [],
             "selected_documents": [document.to_dict() for document in selected_documents],
+            "metadata_filter": (metadata_filter or MetadataFilterDecision()).model_dump(),
             "metrics": metrics,
         }
 
-    async def _dense_search(self, query: str, top_k: int) -> list[EnterpriseRetrievedDocument]:
+    async def _dense_search(
+        self,
+        query: str,
+        top_k: int,
+        metadata_filter: MetadataFilterDecision | None = None,
+    ) -> list[EnterpriseRetrievedDocument]:
         if top_k <= 0:
             return []
         query_vector = await asyncio.to_thread(self.embeddings.embed_query, query)
-        body = {"knn": {"field": "embedding", "query_vector": query_vector, "k": top_k, "num_candidates": max(top_k * 4, top_k)}}
+        knn = {"field": "embedding", "query_vector": query_vector, "k": top_k, "num_candidates": max(top_k * 4, top_k)}
+        es_filter = self._metadata_filter_to_es_filter(metadata_filter)
+        if es_filter:
+            knn["filter"] = es_filter
+        body = {"knn": knn}
         response = await asyncio.to_thread(self.client.search, index=self.index_name, body=body)
         return [self._document_from_hit(hit) for hit in response.get("hits", {}).get("hits", [])]
 
-    async def _bm25_search(self, query: str, top_k: int) -> list[EnterpriseRetrievedDocument]:
+    async def _bm25_search(
+        self,
+        query: str,
+        top_k: int,
+        metadata_filter: MetadataFilterDecision | None = None,
+    ) -> list[EnterpriseRetrievedDocument]:
         if top_k <= 0:
             return []
-        body = {
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["child_text^2", "parent_text", "title^2", "section_heading", "source_type"],
-                }
-            },
-            "size": top_k,
+        multi_match = {
+            "multi_match": {
+                "query": query,
+                "fields": ["child_text^2", "parent_text", "title^2", "section_heading", "source_type", "doc_semantic_type"],
+            }
         }
+        es_filter = self._metadata_filter_to_es_filter(metadata_filter)
+        query_body = multi_match
+        if es_filter:
+            query_body = {"bool": {"must": [multi_match], "filter": es_filter["bool"]["filter"]}}
+        body = {"query": query_body, "size": top_k}
         response = await asyncio.to_thread(self.client.search, index=self.index_name, body=body)
         return [self._document_from_hit(hit) for hit in response.get("hits", {}).get("hits", [])]
+
+    @staticmethod
+    def _metadata_filter_to_es_filter(metadata_filter: MetadataFilterDecision | None) -> dict[str, Any] | None:
+        if not metadata_filter or metadata_filter.mode != "hard":
+            return None
+        clauses: list[dict[str, Any]] = []
+        field_filters = [
+            ("source_type", metadata_filter.source_types),
+            ("doc_semantic_type", metadata_filter.doc_semantic_types),
+            ("title.keyword", metadata_filter.title_keywords),
+            ("section_heading.keyword", metadata_filter.section_keywords),
+        ]
+        for field, values in field_filters:
+            if values:
+                clauses.append({"terms": {field: values}})
+        if not clauses:
+            return None
+        return {"bool": {"filter": clauses}}
 
     @staticmethod
     def _document_from_hit(hit: dict[str, Any]) -> EnterpriseRetrievedDocument:
@@ -153,6 +191,7 @@ class ElasticsearchEnterpriseRetrievalBackend:
         candidates: dict[str, EnterpriseRetrievedDocument],
         rrf_k: int,
         source_hint_soft_boost: float,
+        metadata_filter: MetadataFilterDecision | None = None,
     ) -> dict[str, float]:
         scores: defaultdict[str, float] = defaultdict(float)
         for ranked_ids in ranked_lists:
@@ -168,6 +207,18 @@ class ElasticsearchEnterpriseRetrievalBackend:
                 document = candidates.get(doc_id)
                 if document and document.source_type in source_hint_set:
                     scores[doc_id] = score * (1.0 + source_hint_soft_boost)
+        if metadata_filter and metadata_filter.mode == "soft":
+            source_type_set = set(metadata_filter.source_types)
+            doc_semantic_type_set = set(metadata_filter.doc_semantic_types)
+            if source_type_set or doc_semantic_type_set:
+                for doc_id, score in list(scores.items()):
+                    document = candidates.get(doc_id)
+                    if not document:
+                        continue
+                    matches_source_type = document.source_type in source_type_set
+                    matches_doc_semantic_type = document.metadata.get("doc_semantic_type") in doc_semantic_type_set
+                    if matches_source_type or matches_doc_semantic_type:
+                        scores[doc_id] = score * (1.0 + source_hint_soft_boost)
         return dict(scores)
 
     async def _rerank_documents(self, query: str, documents: list[EnterpriseRetrievedDocument]) -> list[EnterpriseRetrievedDocument]:
