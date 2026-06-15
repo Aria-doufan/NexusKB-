@@ -39,7 +39,6 @@ NexusKB 适合用于：
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Chroma baseline | 500 | 0.9179 | 0.914 | 0.8593 | 0.8638 | 252.91 |
 | Elasticsearch baseline | 500 | 0.9176 | 0.926 | 0.8753 | 0.8764 | 358.58 |
-| ES hard `doc_semantic_type=policy_rule` | 500 | 0.2198 | 0.272 | 0.2598 | 0.2227 | 402.61 |
 | ES soft `doc_semantic_type=policy_rule` | 500 | 0.9134 | 0.914 | 0.8345 | 0.8437 | 351.7 |
 
 结论：Elasticsearch 在保持 recall parity 的同时提升 top-rank 指标；hard metadata filter 适合用户明确要求某类证据时使用，soft metadata filter 更适合隐含约束查询。
