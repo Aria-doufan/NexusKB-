@@ -90,3 +90,25 @@ def test_planner_accepts_google_drive_source_hint_without_underscore_form():
     assert decision.mode == "soft"
     assert decision.source_types == ["google_drive"]
     assert decision.doc_semantic_types == []
+
+
+def test_planner_detects_faq_semantic_type():
+    from app.rag.metadata_filter_planner import plan_metadata_filter
+
+    decision = plan_metadata_filter("Find the FAQ for expense reimbursements", rag_intent="constrained", source_hints=[])
+
+    assert decision.mode == "soft"
+    assert decision.source_types == []
+    assert decision.doc_semantic_types == ["faq"]
+
+
+def test_planner_detects_technical_doc_semantic_type():
+    from app.rag.metadata_filter_planner import plan_metadata_filter
+
+    rfc_decision = plan_metadata_filter("Find the RFC for the retrieval architecture", rag_intent="constrained", source_hints=[])
+    spec_decision = plan_metadata_filter("Find the technical spec for Elasticsearch indexing", rag_intent="constrained", source_hints=[])
+
+    assert rfc_decision.mode == "soft"
+    assert rfc_decision.doc_semantic_types == ["technical_doc"]
+    assert spec_decision.mode == "soft"
+    assert spec_decision.doc_semantic_types == ["technical_doc"]

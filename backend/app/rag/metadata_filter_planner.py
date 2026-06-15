@@ -21,11 +21,13 @@ ALLOWED_DOC_SEMANTIC_TYPES = {
     "chat_thread",
     "code_change",
     "email_thread",
+    "faq",
     "generic_doc",
     "issue_ticket",
     "meeting_notes",
     "playbook",
     "policy_rule",
+    "technical_doc",
 }
 
 SOURCE_PATTERNS = {
@@ -49,6 +51,11 @@ SEMANTIC_PATTERNS = {
     "issue_ticket": re.compile(r"\bticket\b|\bissue\b|\bbug\b|\bincident\b|工单|缺陷|事故", re.IGNORECASE),
     "code_change": re.compile(r"\bpull request\b|\bpr\b|\bcommit\b|\bdiff\b|代码变更|\brepo\b", re.IGNORECASE),
     "account_notes": re.compile(r"\baccount notes\b|客户记录|客户备注|\bcrm\b", re.IGNORECASE),
+    "faq": re.compile(r"\bfaq\b|\bfrequently asked questions\b|常见问题", re.IGNORECASE),
+    "technical_doc": re.compile(
+        r"\brfc\b|\badr\b|\btechnical spec\b|\barchitecture\b|\bdesign doc\b|架构|技术方案",
+        re.IGNORECASE,
+    ),
 }
 
 BROAD_INTENTS = {"multi_hop", "comparison", "completeness", "conflicting_info"}
