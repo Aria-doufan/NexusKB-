@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
-from app.schemas.rag import RagCandidate, RagDocument, RagStrategyConfig, RetrievalAttempt
+from app.schemas.rag import MetadataFilterDecision, RagCandidate, RagDocument, RagStrategyConfig, RetrievalAttempt
 
 
 @dataclass(slots=True)
@@ -31,6 +31,8 @@ class RetrievalPipeline:
         query: str,
         strategy: RagStrategyConfig,
         source_hints: list[str] | None,
+        *,
+        metadata_filter: MetadataFilterDecision | None = None,
         rag_intent: str,
         router_confidence: float,
         attempt_id: int,
@@ -38,21 +40,25 @@ class RetrievalPipeline:
         reason: str = "Initial retrieval.",
     ) -> RetrievalPipelineResult:
         started = perf_counter()
-        raw_result = await self.service.retrieve_with_details(
-            query=query,
-            final_top_k=strategy.final_top_k,
-            dense_top_k=strategy.top_k_dense,
-            bm25_top_k=strategy.top_k_bm25,
-            fusion_top_k=strategy.fusion_top_k,
-            source_hints=source_hints,
-            use_reranker=strategy.use_reranker,
-        )
+        retrieval_kwargs = {
+            "query": query,
+            "final_top_k": strategy.final_top_k,
+            "dense_top_k": strategy.top_k_dense,
+            "bm25_top_k": strategy.top_k_bm25,
+            "fusion_top_k": strategy.fusion_top_k,
+            "source_hints": source_hints,
+            "use_reranker": strategy.use_reranker,
+        }
+        if metadata_filter and (metadata_filter.mode != "none" or metadata_filter.has_filters):
+            retrieval_kwargs["metadata_filter"] = metadata_filter
+        raw_result = await self.service.retrieve_with_details(**retrieval_kwargs)
         selected_documents = [self._to_rag_document(document) for document in raw_result["selected_documents"]]
         attempt = RetrievalAttempt(
             attempt_id=attempt_id,
             query=query,
             sub_query_id=sub_query_id,
             strategy_name=strategy.strategy_name,
+            metadata_filter=metadata_filter or MetadataFilterDecision(),
             dense_results=[self._to_candidate(item) for item in raw_result.get("dense_results", [])],
             bm25_results=[self._to_candidate(item) for item in raw_result.get("bm25_results", [])],
             fused_results=[self._to_candidate(item) for item in raw_result.get("fused_results", [])],
