@@ -204,3 +204,130 @@ def test_elasticsearch_backend_soft_filter_boosts_matching_metadata_without_quer
         "confidence": 0.65,
         "reason": "",
     }
+
+
+def test_elasticsearch_backend_does_not_double_boost_source_hint_and_soft_filter_overlap():
+    from app.rag.enterprise_rag_service import EnterpriseRetrievedDocument
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    document = EnterpriseRetrievedDocument(
+        parent_doc_id="d1",
+        parent_chunk_id="p1",
+        source_type="policy",
+        title="Policy",
+        section_heading="Eligibility",
+        score=0.0,
+        child_text="child",
+        parent_text="parent",
+        metadata={"doc_semantic_type": "policy_rule"},
+    )
+
+    scores = ElasticsearchEnterpriseRetrievalBackend._rrf_fuse(
+        ranked_lists=[["p1"]],
+        source_hints=["policy"],
+        candidates={"p1": document},
+        rrf_k=60,
+        source_hint_soft_boost=0.2,
+        metadata_filter=MetadataFilterDecision(mode="soft", source_types=["policy"], confidence=0.7),
+    )
+
+    assert scores["p1"] == (1 / 61) * 1.2
+
+
+def test_elasticsearch_backend_hard_filter_uses_phrase_matching_for_title_and_section_keywords():
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    client = FakeElasticsearchClient()
+    backend = ElasticsearchEnterpriseRetrievalBackend(client=client, embeddings=FakeEmbeddings(), index_name="idx")
+
+    import asyncio
+
+    asyncio.run(
+        backend.retrieve_with_details(
+            query="PTO eligibility",
+            final_top_k=2,
+            dense_top_k=5,
+            bm25_top_k=5,
+            fusion_top_k=5,
+            source_hints=[],
+            use_reranker=False,
+            metadata_filter=MetadataFilterDecision(
+                mode="hard",
+                title_keywords=["pto", "paid time off"],
+                section_keywords=["eligibility"],
+                confidence=0.9,
+            ),
+        )
+    )
+
+    expected_filter = {
+        "bool": {
+            "filter": [
+                {
+                    "bool": {
+                        "should": [
+                            {"match_phrase": {"title": "pto"}},
+                            {"match_phrase": {"title": "paid time off"}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                },
+                {"match_phrase": {"section_heading": "eligibility"}},
+            ]
+        }
+    }
+    knn_filter = client.search_calls[0]["body"]["knn"]["filter"]
+    bm25_filter = client.search_calls[1]["body"]["query"]["bool"]["filter"]
+
+    assert knn_filter == expected_filter
+    assert bm25_filter == expected_filter["bool"]["filter"]
+    assert {"terms": {"title.keyword": ["pto", "paid time off"]}} not in bm25_filter
+    assert {"terms": {"section_heading.keyword": ["eligibility"]}} not in bm25_filter
+
+
+def test_elasticsearch_backend_soft_filter_boosts_title_and_section_keyword_matches():
+    from app.rag.enterprise_rag_service import EnterpriseRetrievedDocument
+    from app.rag.retrieval_backends.elasticsearch_enterprise import ElasticsearchEnterpriseRetrievalBackend
+    from app.schemas.rag import MetadataFilterDecision
+
+    title_document = EnterpriseRetrievedDocument(
+        parent_doc_id="d1",
+        parent_chunk_id="p1",
+        source_type="faq",
+        title="PTO Policy",
+        section_heading="Overview",
+        score=0.0,
+        child_text="child",
+        parent_text="parent",
+        metadata={"doc_semantic_type": "generic_doc"},
+    )
+    section_document = EnterpriseRetrievedDocument(
+        parent_doc_id="d2",
+        parent_chunk_id="p2",
+        source_type="faq",
+        title="Benefits",
+        section_heading="Eligibility",
+        score=0.0,
+        child_text="child",
+        parent_text="parent",
+        metadata={"doc_semantic_type": "generic_doc"},
+    )
+
+    scores = ElasticsearchEnterpriseRetrievalBackend._rrf_fuse(
+        ranked_lists=[["p1", "p2"]],
+        source_hints=[],
+        candidates={"p1": title_document, "p2": section_document},
+        rrf_k=60,
+        source_hint_soft_boost=0.2,
+        metadata_filter=MetadataFilterDecision(
+            mode="soft",
+            title_keywords=["pto"],
+            section_keywords=["eligibility"],
+            confidence=0.7,
+        ),
+    )
+
+    assert scores["p1"] == (1 / 61) * 1.2
+    assert scores["p2"] == (1 / 62) * 1.2

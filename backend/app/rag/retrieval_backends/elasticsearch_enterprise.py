@@ -159,15 +159,28 @@ class ElasticsearchEnterpriseRetrievalBackend:
         field_filters = [
             ("source_type", metadata_filter.source_types),
             ("doc_semantic_type", metadata_filter.doc_semantic_types),
-            ("title.keyword", metadata_filter.title_keywords),
-            ("section_heading.keyword", metadata_filter.section_keywords),
         ]
         for field, values in field_filters:
             if values:
                 clauses.append({"terms": {field: values}})
+        title_clause = ElasticsearchEnterpriseRetrievalBackend._phrase_filter_clause("title", metadata_filter.title_keywords)
+        if title_clause:
+            clauses.append(title_clause)
+        section_clause = ElasticsearchEnterpriseRetrievalBackend._phrase_filter_clause("section_heading", metadata_filter.section_keywords)
+        if section_clause:
+            clauses.append(section_clause)
         if not clauses:
             return None
         return {"bool": {"filter": clauses}}
+
+    @staticmethod
+    def _phrase_filter_clause(field: str, phrases: list[str]) -> dict[str, Any] | None:
+        match_phrases = [{"match_phrase": {field: phrase}} for phrase in phrases if phrase]
+        if not match_phrases:
+            return None
+        if len(match_phrases) == 1:
+            return match_phrases[0]
+        return {"bool": {"should": match_phrases, "minimum_should_match": 1}}
 
     @staticmethod
     def _document_from_hit(hit: dict[str, Any]) -> EnterpriseRetrievedDocument:
@@ -202,23 +215,31 @@ class ElasticsearchEnterpriseRetrievalBackend:
                 seen.add(doc_id)
                 scores[doc_id] += 1.0 / (rrf_k + rank)
         source_hint_set = {source for source in (source_hints or []) if source}
-        if source_hint_set:
+        soft_source_type_set: set[str] = set()
+        soft_doc_semantic_type_set: set[str] = set()
+        soft_title_keywords: list[str] = []
+        soft_section_keywords: list[str] = []
+        if metadata_filter and metadata_filter.mode == "soft":
+            soft_source_type_set = {source_type for source_type in metadata_filter.source_types if source_type}
+            soft_doc_semantic_type_set = {doc_type for doc_type in metadata_filter.doc_semantic_types if doc_type}
+            soft_title_keywords = [keyword.lower() for keyword in metadata_filter.title_keywords if keyword]
+            soft_section_keywords = [keyword.lower() for keyword in metadata_filter.section_keywords if keyword]
+        if source_hint_set or soft_source_type_set or soft_doc_semantic_type_set or soft_title_keywords or soft_section_keywords:
             for doc_id, score in list(scores.items()):
                 document = candidates.get(doc_id)
-                if document and document.source_type in source_hint_set:
+                if not document:
+                    continue
+                title = document.title.lower()
+                section_heading = document.section_heading.lower()
+                matches_soft_filter = (
+                    document.source_type in source_hint_set
+                    or document.source_type in soft_source_type_set
+                    or document.metadata.get("doc_semantic_type") in soft_doc_semantic_type_set
+                    or any(keyword in title for keyword in soft_title_keywords)
+                    or any(keyword in section_heading for keyword in soft_section_keywords)
+                )
+                if matches_soft_filter:
                     scores[doc_id] = score * (1.0 + source_hint_soft_boost)
-        if metadata_filter and metadata_filter.mode == "soft":
-            source_type_set = set(metadata_filter.source_types)
-            doc_semantic_type_set = set(metadata_filter.doc_semantic_types)
-            if source_type_set or doc_semantic_type_set:
-                for doc_id, score in list(scores.items()):
-                    document = candidates.get(doc_id)
-                    if not document:
-                        continue
-                    matches_source_type = document.source_type in source_type_set
-                    matches_doc_semantic_type = document.metadata.get("doc_semantic_type") in doc_semantic_type_set
-                    if matches_source_type or matches_doc_semantic_type:
-                        scores[doc_id] = score * (1.0 + source_hint_soft_boost)
         return dict(scores)
 
     async def _rerank_documents(self, query: str, documents: list[EnterpriseRetrievedDocument]) -> list[EnterpriseRetrievedDocument]:
