@@ -3,6 +3,7 @@ from time import perf_counter
 from typing import Any
 
 from app.rag.decomposition import decompose_query, merge_decomposed_scores
+from app.rag.metadata_filter_planner import plan_metadata_filter
 from app.rag.web_search import normalize_web_search_results
 from app.schemas.rag import (
     EvaluationResult,
@@ -65,6 +66,7 @@ class RagEvidenceWorkflow:
         trace = self.initialize_trace(state, started_at)
 
         self.planner(state, trace)
+        self.metadata_filter_plan(state, trace)
         self.strategy_select(state, trace)
 
         retry_reason = "Initial hybrid retrieval."
@@ -73,6 +75,16 @@ class RagEvidenceWorkflow:
             retry_reason = "Initial hybrid retrieval."
             self.evaluate_context(state, trace)
             self.decide_next_action(state)
+
+            if (
+                state.metadata_filter_decision.mode == "hard"
+                and state.evaluator_result
+                and not state.evaluator_result.enough_evidence
+                and state.metadata_filter_fallback_count < 1
+            ):
+                self.broaden_metadata_filter(state)
+                retry_reason = "Retry after broadening hard metadata filter to soft metadata boost."
+                continue
 
             if state.next_action == "rewrite_query" and state.retry_count < state.max_retries:
                 self.rewrite_query(state)
@@ -132,6 +144,48 @@ class RagEvidenceWorkflow:
         )
         trace.planner = PlannerTrace(plan=state.plan)
         self._record_event(state, "rag_plan_created", "planner", data=state.plan.model_dump())
+
+    def metadata_filter_plan(self, state: RagState, trace: RagDebugTrace) -> None:
+        decision = plan_metadata_filter(
+            query=state.original_query,
+            rag_intent=state.rag_intent,
+            source_hints=state.source_hints,
+        )
+        state.metadata_filter_decision = decision
+        if state.plan:
+            state.plan.constraints = {
+                **state.plan.constraints,
+                "metadata_filter": decision.model_dump(),
+            }
+        self._record_event(state, "metadata_filter_planned", "metadata_filter_plan", data=decision.model_dump())
+
+    def broaden_metadata_filter(self, state: RagState) -> None:
+        decision = state.metadata_filter_decision
+        if decision.mode == "hard":
+            state.metadata_filter_decision = decision.model_copy(
+                update={
+                    "mode": "soft",
+                    "reason": f"{decision.reason} Broadened from hard filter after insufficient evidence.",
+                }
+            )
+        elif decision.mode == "soft":
+            state.metadata_filter_decision = decision.model_copy(
+                update={
+                    "mode": "none",
+                    "source_types": [],
+                    "doc_semantic_types": [],
+                    "title_keywords": [],
+                    "section_keywords": [],
+                    "reason": f"{decision.reason} Broadened from soft filter after insufficient evidence.",
+                }
+            )
+        state.metadata_filter_fallback_count += 1
+        self._record_event(
+            state,
+            "metadata_filter_broadened",
+            "broaden_metadata_filter",
+            data=state.metadata_filter_decision.model_dump(),
+        )
 
     def strategy_select(self, state: RagState, trace: RagDebugTrace) -> None:
         strategy = self.strategy_router.select(state)
