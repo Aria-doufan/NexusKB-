@@ -97,6 +97,7 @@ class AgenticRagGraph:
         graph.add_node("evaluate_context", self.evaluate_context_node)
         graph.add_node("decide_next_action", self.decide_next_action_node)
         graph.add_node("apply_retry", self.apply_retry_node)
+        graph.add_node("broaden_metadata_filter", self.broaden_metadata_filter_node)
         graph.add_node("external_search", self.external_search_node)
         graph.add_node("generate_answer", self.generate_answer_node)
         graph.add_node("finalize_trace", self.finalize_trace_node)
@@ -126,12 +127,14 @@ class AgenticRagGraph:
             self.route_after_decide_next_action,
             {
                 "apply_retry": "apply_retry",
+                "broaden_metadata_filter": "broaden_metadata_filter",
                 "external_search": "external_search",
                 "generate_answer": "generate_answer",
                 "finalize_trace": "finalize_trace",
             },
         )
         graph.add_edge("apply_retry", "retrieve")
+        graph.add_edge("broaden_metadata_filter", "retrieve")
         graph.add_edge("external_search", "generate_answer")
         graph.add_edge("generate_answer", "finalize_trace")
         graph.add_edge("finalize_trace", END)
@@ -373,10 +376,14 @@ class AgenticRagGraph:
         trace = self._require_trace()
         if state.plan is None:
             self.rag_workflow.planner(state, trace)
+        if self._metadata_filter_plan_needed(state):
+            self.rag_workflow.metadata_filter_plan(state, trace)
         if state.strategy is None:
             self.rag_workflow.strategy_select(state, trace)
         reason = "Initial hybrid retrieval."
-        if state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count > 0:
+        if state.next_action == "broaden_metadata_filter" and state.metadata_filter_fallback_count > 0:
+            reason = "Retry after broadening hard metadata filter to soft metadata boost."
+        elif state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count > 0:
             reason = f"Retry after {state.next_action}."
         await self.rag_workflow.retrieve(state, trace, reason)
         return state
@@ -394,6 +401,10 @@ class AgenticRagGraph:
             self.rag_workflow.rewrite_query(state)
         elif state.next_action == "expand_top_k":
             self.rag_workflow.expand_top_k(state)
+        return state
+
+    def broaden_metadata_filter_node(self, state: RagState) -> RagState:
+        self.rag_workflow.broaden_metadata_filter(state)
         return state
 
     def external_search_node(self, state: RagState) -> RagState:
@@ -417,11 +428,23 @@ class AgenticRagGraph:
     def route_after_decide_next_action(self, state: RagState) -> str:
         if state.next_action in {"rewrite_query", "expand_top_k"} and state.retry_count < state.max_retries:
             return "apply_retry"
+        if state.next_action == "broaden_metadata_filter":
+            return "broaden_metadata_filter"
         if state.next_action == "external_search":
             return "external_search"
         if state.next_action == "generate":
             return "generate_answer"
         return "generate_answer"
+
+    @staticmethod
+    def _metadata_filter_plan_needed(state: RagState) -> bool:
+        decision = state.metadata_filter_decision
+        return (
+            decision.mode == "none"
+            and not decision.has_filters
+            and decision.confidence == 0.0
+            and state.metadata_filter_fallback_count == 0
+        )
 
     def _parse_decision(self, raw: Any) -> AgenticActionDecision:
         if isinstance(raw, AgenticActionDecision):

@@ -382,6 +382,91 @@ async def test_agentic_rag_graph_builds_insufficient_evidence_answer_when_retrie
 
 
 @pytest.mark.anyio
+async def test_agentic_rag_graph_plans_and_routes_metadata_filter_broadening_on_public_run_path():
+    from app.rag.agentic_rag_graph import AgenticRagGraph
+    from app.rag.rag_evidence_workflow import RagEvidenceWorkflow
+    from app.schemas.rag import AgenticActionDecision, RagState
+
+    class StaticStrategyRouter:
+        def select(self, state):
+            from app.schemas.rag import RagStrategyConfig
+
+            return RagStrategyConfig(final_top_k=2, top_k_dense=5, top_k_bm25=5, fusion_top_k=5)
+
+    class EmptyThenUsefulPipeline:
+        def __init__(self):
+            self.filters = []
+
+        async def run(self, **kwargs):
+            from app.rag.retrieval_pipeline import RetrievalPipelineResult, RetrievalStageMetrics
+            from app.schemas.rag import RagDocument, RetrievalAttempt
+
+            metadata_filter = kwargs["metadata_filter"]
+            self.filters.append(metadata_filter.mode)
+            attempt = RetrievalAttempt(
+                attempt_id=kwargs["attempt_id"],
+                query=kwargs["query"],
+                strategy_name="test",
+                metadata_filter=metadata_filter,
+                reason=kwargs["reason"],
+            )
+            if len(self.filters) == 1:
+                return RetrievalPipelineResult(selected_documents=[], attempt=attempt, metrics=RetrievalStageMetrics(total_ms=1.0), raw={})
+            document = RagDocument(
+                source_id="p1",
+                parent_doc_id="d1",
+                parent_chunk_id="p1",
+                source_type="confluence",
+                title="PTO Policy",
+                text="Employees can request PTO in the HR system.",
+                metadata={"doc_semantic_type": "policy_rule"},
+            )
+            attempt.selected_documents = [document]
+            return RetrievalPipelineResult(selected_documents=[document], attempt=attempt, metrics=RetrievalStageMetrics(total_ms=1.0), raw={})
+
+    class AnswerService:
+        async def generate_answer(self, query, documents, memory_context=None, web_results=None, evidence_mode="internal_only"):
+            return f"generated answer for {query} with {len(documents)} docs"
+
+    pipeline = EmptyThenUsefulPipeline()
+    workflow = RagEvidenceWorkflow(
+        service=AnswerService(),
+        trace_store=StubTraceStore(),
+        strategy_router=StaticStrategyRouter(),
+        retrieval_pipeline=pipeline,
+    )
+    graph = AgenticRagGraph(
+        rag_workflow=workflow,
+        decision_chain=StaticDecisionChain(
+            AgenticActionDecision(
+                intent="constrained",
+                action="retrieve",
+                needs_retrieval=True,
+                source_hints=["confluence"],
+                confidence=0.88,
+                reason="Needs internal policy evidence.",
+            )
+        ),
+    )
+    state = RagState(
+        request_id="req-filter-graph",
+        debug_id="dbg-filter-graph",
+        user_id="user-1",
+        original_query="Find the Confluence PTO policy",
+        current_query="Find the Confluence PTO policy",
+        max_retries=0,
+    )
+
+    response = await graph.run(state)
+
+    assert pipeline.filters == ["hard", "soft"]
+    assert [attempt.metadata_filter.mode for attempt in state.retrieval_attempts] == ["hard", "soft"]
+    assert state.metadata_filter_fallback_count == 1
+    assert state.next_action == "generate"
+    assert response.answer == "generated answer for Find the Confluence PTO policy with 1 docs"
+
+
+@pytest.mark.anyio
 async def test_agentic_rag_graph_records_retry_reason_on_followup_retrieval_attempt():
     from app.rag.agentic_rag_graph import AgenticRagGraph
     from app.schemas.rag import AgenticActionDecision, RagState

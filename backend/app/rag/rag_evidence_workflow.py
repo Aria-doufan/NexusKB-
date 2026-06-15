@@ -76,12 +76,7 @@ class RagEvidenceWorkflow:
             self.evaluate_context(state, trace)
             self.decide_next_action(state)
 
-            if (
-                state.metadata_filter_decision.mode == "hard"
-                and state.evaluator_result
-                and not state.evaluator_result.enough_evidence
-                and state.metadata_filter_fallback_count < 1
-            ):
+            if state.next_action == "broaden_metadata_filter":
                 self.broaden_metadata_filter(state)
                 retry_reason = "Retry after broadening hard metadata filter to soft metadata boost."
                 continue
@@ -161,24 +156,15 @@ class RagEvidenceWorkflow:
 
     def broaden_metadata_filter(self, state: RagState) -> None:
         decision = state.metadata_filter_decision
-        if decision.mode == "hard":
-            state.metadata_filter_decision = decision.model_copy(
-                update={
-                    "mode": "soft",
-                    "reason": f"{decision.reason} Broadened from hard filter after insufficient evidence.",
-                }
-            )
-        elif decision.mode == "soft":
-            state.metadata_filter_decision = decision.model_copy(
-                update={
-                    "mode": "none",
-                    "source_types": [],
-                    "doc_semantic_types": [],
-                    "title_keywords": [],
-                    "section_keywords": [],
-                    "reason": f"{decision.reason} Broadened from soft filter after insufficient evidence.",
-                }
-            )
+        if decision.mode != "hard":
+            return
+
+        state.metadata_filter_decision = decision.model_copy(
+            update={
+                "mode": "soft",
+                "reason": f"{decision.reason} Broadened from hard filter after insufficient evidence.",
+            }
+        )
         state.metadata_filter_fallback_count += 1
         self._record_event(
             state,
@@ -373,6 +359,23 @@ class RagEvidenceWorkflow:
             return
         if state.evaluator_result and state.evaluator_result.enough_evidence:
             state.next_action = "external_search" if self._needs_public_context(state.original_query) else "generate"
+            return
+        if (
+            state.evaluator_result
+            and not state.evaluator_result.enough_evidence
+            and state.metadata_filter_decision.mode == "hard"
+            and state.metadata_filter_fallback_count < 1
+        ):
+            state.next_action = "broaden_metadata_filter"
+            self._record_event(
+                state,
+                "metadata_filter_fallback_decided",
+                "decide_next_action",
+                data={
+                    "metadata_filter_fallback_count": state.metadata_filter_fallback_count,
+                    "next_action": state.next_action,
+                },
+            )
             return
         if state.retry_count >= state.max_retries:
             state.next_action = "external_search"
