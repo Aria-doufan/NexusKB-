@@ -1,31 +1,48 @@
 # NexusKB
 
-NexusKB 是一个面向企业知识库场景的 RAG 智能问答系统。项目围绕“企业内部文档如何被可靠检索、组织、重排并用于回答问题”展开，整合了 FastAPI 问答服务、Django 用户服务、Vue 前端、MySQL 会话存储、Redis 缓存和 Chroma 向量检索。
+NexusKB 是一个面向企业知识库场景的 Agentic RAG 智能问答系统。项目围绕“企业内部知识如何被可靠切分、索引、检索、过滤、评估并用于回答问题”展开，整合了 FastAPI 问答服务、LangGraph Agentic RAG workflow、Elasticsearch 企业检索后端、Chroma baseline、Django 用户服务、Vue 前端、MySQL 会话存储和 Redis 缓存。
 
-与通用聊天应用不同，NexusKB 的重点不是单轮闲聊，而是企业文档问答链路：用户提出业务问题后，系统会从知识库中召回相关资料，结合会话上下文和重排序结果生成回答，并保留用户身份、会话历史和接口状态。
+与通用聊天应用不同，NexusKB 的重点不是单轮闲聊，而是可评估、可追踪、可迭代的企业文档问答链路：用户提出业务问题后，系统会规划检索策略，从企业知识库中召回相关资料，结合 metadata filter、上下文评估、fallback retry 和引用证据生成回答，并保留用户身份、会话历史、接口状态和调试轨迹。
 
 ## 项目定位
 
 NexusKB 适合用于：
 
-- 企业知识库问答
-- 内部制度、流程、产品资料检索
-- RAG 检索与重排序实验
-- 多服务 AI 应用课程设计或毕业设计
-- 智能客服、知识助手原型验证
+- 企业知识库问答与内部知识助手
+- 内部制度、流程、工单、会议、代码变更和客户记录检索
+- Agentic RAG workflow、检索策略规划和 fallback 机制验证
+- Elasticsearch / Chroma 混合检索、metadata filter 和 reranker 评估
+- 多服务 AI 应用、后端工程和 Agent 应用开发作品展示
+- 智能客服、知识助手和企业搜索原型验证
 
 ## 核心能力
 
-- 企业知识问答：基于企业文档内容进行检索增强回答。
-- RAG 检索链路：支持文档解析、文本切分、向量化、ChromaDB 索引和相似度召回。
+- Agentic RAG workflow：基于 LangGraph 编排 planner、strategy select、retrieve、context evaluation、query rewrite / decomposition / web fallback 等节点。
+- 企业混合检索：Elasticsearch 作为 enterprise retrieval 默认后端，支持 dense kNN、BM25、RRF fusion 和 metadata filter；Chroma 保留为 baseline。
+- Metadata-filtered retrieval：通过白名单 planner 生成 `none` / `soft` / `hard` filter 决策，支持 `source_type` 与 `doc_semantic_type` 的硬过滤、软 boost 和 hard → soft fallback。
+- 文档语义类型：为企业资料标注 `policy_rule`、`issue_ticket`、`meeting_notes`、`email_thread`、`code_change` 等语义类型，并贯通准备、索引、检索、评估和 RAG context。
+- 检索评估闭环：提供 EnterpriseRAG-Bench 数据准备、chunking profile 对比、Elasticsearch/Chroma 后端评估、metadata filter 实验和报告文档。
 - 检索结果重排序：支持本地 reranker 模型，对初步召回片段进行二次排序。
 - 会话记忆：使用 MySQL 持久化聊天历史，支持多轮对话上下文。
-- 长期记忆实验：新增长期记忆抽取、去重、向量召回和评估脚本，用于验证跨会话记忆效果。
+- 长期记忆实验：支持长期记忆抽取、去重、向量召回和评估脚本，用于验证跨会话记忆效果。
 - 用户体系：独立 Django 用户服务，提供注册、登录、JWT 鉴权、Token 刷新和用户信息接口。
 - 前端应用：Vue 3 前端提供登录、注册、聊天、会话、个人中心和设置页面。
 - 缓存与限流：Redis 用于用户信息缓存、Token 黑名单和接口限流。
-- 观测与审计：补充性能日志、审计日志脱敏工具和长期记忆评测输出，便于定位检索、记忆和回答链路问题。
+- 观测与审计：补充性能日志、debug trace、审计日志脱敏工具和评测输出，便于定位检索、记忆和回答链路问题。
 - 多模型接入：支持 DashScope 云端模型，也预留 Ollama、本地 embedding 和 reranker 模型配置。
+
+## 当前评估结果
+
+`v0.3.0` 选择 `semantic_baseline_threshold` chunking profile，并将 Elasticsearch 作为企业检索默认后端。关键评估结果：
+
+| 后端 / 模式 | questions | recall@10 | hit@5 | mrr@20 | ndcg@10 | avg latency ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Chroma baseline | 500 | 0.9179 | 0.914 | 0.8593 | 0.8638 | 252.91 |
+| Elasticsearch baseline | 500 | 0.9176 | 0.926 | 0.8753 | 0.8764 | 358.58 |
+| ES hard `doc_semantic_type=policy_rule` | 500 | 0.2198 | 0.272 | 0.2598 | 0.2227 | 402.61 |
+| ES soft `doc_semantic_type=policy_rule` | 500 | 0.9134 | 0.914 | 0.8345 | 0.8437 | 351.7 |
+
+结论：Elasticsearch 在保持 recall parity 的同时提升 top-rank 指标；hard metadata filter 适合用户明确要求某类证据时使用，soft metadata filter 更适合隐含约束查询。
 
 ## 架构概览
 
@@ -81,6 +98,7 @@ NexusKB-/
 - Uvicorn
 - LangChain
 - LangGraph
+- Elasticsearch
 - ChromaDB
 - SQLAlchemy
 - aiomysql
@@ -120,6 +138,7 @@ NexusKB-/
 
 - MySQL
 - Redis
+- Elasticsearch
 - ChromaDB
 - DashScope API
 - 可选本地模型服务
@@ -135,6 +154,7 @@ NexusKB-/
 - MySQL
 - Redis
 - Git
+- Docker Desktop 或本地 Elasticsearch 8.x
 
 如果使用本地重排序模型，还需要准备 PyTorch 运行环境和足够的模型存储空间。
 
@@ -201,6 +221,12 @@ copy .env.example .env
 
 ## 启动服务
 
+如需运行 Elasticsearch 检索评估或企业检索后端，先启动本地 Elasticsearch：
+
+```powershell
+docker compose -f docker-compose.elasticsearch.yml up -d
+```
+
 启动 MySQL 和 Redis 后，先启动用户服务：
 
 ```bash
@@ -239,7 +265,7 @@ Windows 本地开发也可以使用根目录脚本同时拉起 Redis、Django、
 
 - 企业知识文档
 - 问题集或评测集
-- ChromaDB 索引目录
+- Elasticsearch 索引或 ChromaDB baseline 索引目录
 - 可选 reranker 模型权重
 
 相关配置位于：
@@ -255,12 +281,12 @@ backend/app/config/rag.yaml
 backend/scripts/
 ```
 
-其中企业 RAG parent-child 索引默认使用：
+其中当前企业 RAG semantic baseline 评估默认使用：
 
 ```text
-backend/data/enterprise_rag_bench/child_chunks_parent_child.jsonl
-backend/data/chromadb_enterprise_parent_child
-enterprise_rag_bench_parent_child
+backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/child_chunks_parent_child.jsonl
+backend/data/chunking_eval_outputs/stage2_semantic/semantic_baseline_threshold_p3000-o300_c700-o100/prepared/parent_chunks_parent_child.jsonl
+nexuskb_enterprise_chunks
 ```
 
 长期记忆评估资产包括：
@@ -274,17 +300,18 @@ docs/experiments/memory_eval.md
 
 ## 未来方向
 
-- 优化企业知识库 chunk 策略。
-- 引入混合检索：关键词检索 + 向量检索。
-- 完善 reranker 评测指标。
-- 增加回答引用来源展示。
-- 增加知识库上传、索引状态和管理页面。
+- 将 Elasticsearch 检索、metadata filter 和 agentic fallback 能力接入更多端到端用户场景。
+- 完善 reranker 在 Elasticsearch 后端上的评测与对比。
+- 增加回答引用来源展示和 evidence 可视化。
+- 增加知识库上传、索引状态、metadata 管理和评估结果管理页面。
 - 完善长期记忆的数据模型、数据库迁移、API 暴露和端到端验收。
-- 增加 Docker Compose 和 CI。
+- 增加 CI、Docker Compose 集成验证和发布前自动评测。
 - 增加权限分级和文件上传安全检查。
 
 ## 更多文档
 
+- [版本更新记录](./CHANGELOG.md)
+- [GitHub Releases](https://github.com/Aria-doufan/NexusKB-/releases)
 - [项目介绍](./docs/PROJECT_INTRO.md)
 - [项目总览](./docs/PROJECT_OVERVIEW.md)
 - [项目指南](./docs/project_guide/README.md)
