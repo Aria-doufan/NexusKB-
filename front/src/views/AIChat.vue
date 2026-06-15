@@ -457,7 +457,7 @@ const loadSessionHistory = (session) => {
 <style scoped>
 .chat-cockpit {
   display: grid;
-  grid-template-columns: 280px minmax(420px, 1fr);
+  grid-template-columns: 220px minmax(420px, 1fr);
   gap: 20px;
   height: calc(100vh - 142px);
   min-height: 680px;
@@ -465,7 +465,7 @@ const loadSessionHistory = (session) => {
 }
 
 .chat-cockpit--evidence-open {
-  grid-template-columns: 280px minmax(420px, 1fr) 320px;
+  grid-template-columns: 220px minmax(420px, 1fr) 320px;
 }
 
 .enterprise-card {
@@ -542,28 +542,28 @@ const loadSessionHistory = (session) => {
 .conversation-rail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  padding: 18px;
+  padding: 14px;
   overflow: hidden;
 }
 
 .new-chat-button {
   width: 100%;
-  padding: 13px 16px;
+  padding: 12px 14px;
   text-align: center;
 }
 
 .conversation-rail .enterprise-input {
   flex: 0 0 auto;
-  padding: 12px 14px;
-  font-size: 14px;
+  padding: 11px 12px;
+  font-size: 13px;
 }
 
 .rail-section-title {
-  margin-top: 8px;
+  margin-top: 6px;
   color: #64748b;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 900;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -572,19 +572,19 @@ const loadSessionHistory = (session) => {
 .session-list-scroll {
   display: grid;
   flex: 1 1 auto;
-  gap: 12px;
+  gap: 10px;
   min-height: 0;
   overflow-y: auto;
 }
 
 .session-row {
   display: grid;
-  gap: 6px;
+  gap: 5px;
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 16px;
+  border-radius: 14px;
   background: transparent;
-  padding: 13px 14px;
+  padding: 11px 12px;
   color: #334155;
   text-align: left;
   cursor: pointer;
@@ -1086,7 +1086,7 @@ const loadSessionHistory = (session) => {
 
 @media (max-width: 1200px) {
   .chat-cockpit {
-    grid-template-columns: 260px minmax(0, 1fr);
+    grid-template-columns: 210px minmax(0, 1fr);
   }
 }
 
