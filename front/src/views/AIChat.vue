@@ -64,10 +64,20 @@
         >
           <div class="message-avatar">{{ message.role === 'user' ? '我' : 'AI' }}</div>
           <div class="message-content">
-            <div v-if="message.role === 'assistant' && message.content === ''" class="typing-indicator">
-              <span></span>
-              <span></span>
-              <span></span>
+            <div
+              v-if="message.role === 'assistant' && message.isProgressVisible && !message.content"
+              class="retrieval-progress"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="retrieval-progress__pulse"></span>
+              <span class="retrieval-progress__copy">
+                <strong>{{ message.progressStatus || '正在分析问题……' }}</strong>
+                <small v-if="message.progressDetail">{{ message.progressDetail }}</small>
+              </span>
+            </div>
+            <div v-else-if="message.role === 'assistant' && !message.content" class="empty-assistant-message">
+              暂无回复内容
             </div>
             <div v-else v-html="formatMessage(message.content)"></div>
           </div>
@@ -125,6 +135,12 @@ import 'highlight.js/styles/monokai-sublime.css';
 import 'highlight.js/lib/common';
 import { useUserStore } from '../store/user';
 import { useSessionStore } from '../store/session';
+import {
+  applyProgressEvent,
+  createAssistantProgressMessage,
+  hideAssistantProgress,
+  normalizeProgressEvent,
+} from '../utils/chatProgress';
 
 // 从cookie中获取CSRF token
 const getCsrfToken = () => {
@@ -242,7 +258,10 @@ const sendMessage = async () => {
   userInput.value = '';
 
   // 添加AI消息占位
-  messages.value.push({ role: 'assistant', content: '' });
+  messages.value.push(createAssistantProgressMessage());
+  const assistantMessage = messages.value[messages.value.length - 1];
+  const shouldRouteToNewSession = !route.params.sessionId;
+  const requestRoutePath = route.fullPath;
   evidenceItems.value = [];
 
   // 滚动到底部
@@ -252,11 +271,13 @@ const sendMessage = async () => {
   // 发送请求
   isLoading.value = true;
   try {
-    await fetchAIResponse(userMessage);
+    await fetchAIResponse(userMessage, assistantMessage, shouldRouteToNewSession, requestRoutePath);
   } catch (error) {
     console.error('Error fetching AI response:', error);
-    // 更新最后一条消息为错误信息
-    messages.value[messages.value.length - 1].content = `发生错误: ${error.message || '请检查网络连接和API设置'}`;
+    if (assistantMessage.role === 'assistant') {
+      hideAssistantProgress(assistantMessage);
+      assistantMessage.content = `发生错误: ${error.message || '请检查网络连接和API设置'}`;
+    }
   } finally {
     isLoading.value = false;
     await nextTick();
@@ -265,7 +286,7 @@ const sendMessage = async () => {
 };
 
 // 获取AI响应（使用SSE）
-const fetchAIResponse = async (userMessage) => {
+const fetchAIResponse = async (userMessage, assistantMessage, shouldRouteToNewSession, requestRoutePath) => {
   try {
     // 确保使用正确的相对路径，通过Vite代理访问
     const url = '/api/agent/query/stream';
@@ -296,6 +317,8 @@ const fetchAIResponse = async (userMessage) => {
     const decoder = new TextDecoder();
     let buffer = '';
     let aiResponse = '';
+    const isActiveAssistantMessage = () => messages.value.includes(assistantMessage);
+    const isActiveRequest = () => isActiveAssistantMessage() && route.fullPath === requestRoutePath;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -310,50 +333,65 @@ const fetchAIResponse = async (userMessage) => {
         const data = line.slice(6);
         if (!data) continue;
 
+        let json;
         try {
-          const json = JSON.parse(data);
-
-          switch (json.type) {
-            case 'step':
-              break;
-            case 'response':
-              const content = json.content || '';
-              if (content) {
-                aiResponse += content;
-
-                // 逐字符显示打字机效果
-                const displayContent = messages.value[messages.value.length - 1].content || '';
-                const remainingContent = aiResponse.substring(displayContent.length);
-
-                for (const char of remainingContent) {
-                  messages.value[messages.value.length - 1].content += char;
-                  await nextTick();
-                  scrollToBottom();
-                  // 控制打字速度，每个字符延迟8ms
-                  await new Promise(resolve => setTimeout(resolve, 8));
-                }
-              }
-              // 保存会话ID（不立即跳转，避免中断SSE）
-              if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim()) {
-                sessionId.value = json.session_id;
-              }
-              break;
-            case 'done':
-              // 保存会话ID并在所有数据接收完成后跳转
-              if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim()) {
-                sessionId.value = json.session_id;
-                // 如果当前路由没有sessionId参数，跳转到带sessionId的路由
-                if (!route.params.sessionId) {
-                  router.push(`/aichat/${json.session_id}`);
-                }
-              }
-              break;
-            case 'error':
-              throw new Error(json.content || 'API错误');
-              break;
-          }
+          json = JSON.parse(data);
         } catch (e) {
           console.error('Error parsing SSE data:', e);
+          continue;
+        }
+
+        const progressEvent = normalizeProgressEvent(json);
+        if (progressEvent) {
+          applyProgressEvent(assistantMessage, progressEvent);
+          await nextTick();
+          scrollToBottom();
+
+          const hasContent = Object.prototype.hasOwnProperty.call(json, 'content');
+          const isResponseDoneOrError = ['response', 'done', 'error'].includes(json.type);
+          if (!isResponseDoneOrError && !hasContent) {
+            continue;
+          }
+        }
+
+        switch (json.type) {
+          case 'step':
+            break;
+          case 'response':
+            const content = json.content || '';
+            if (content) {
+              hideAssistantProgress(assistantMessage);
+              aiResponse += content;
+
+              // 逐字符显示打字机效果
+              const displayContent = assistantMessage.content || '';
+              const remainingContent = aiResponse.substring(displayContent.length);
+
+              for (const char of remainingContent) {
+                assistantMessage.content += char;
+                await nextTick();
+                scrollToBottom();
+                // 控制打字速度，每个字符延迟8ms
+                await new Promise(resolve => setTimeout(resolve, 8));
+              }
+            }
+            // 保存会话ID（不立即跳转，避免中断SSE）
+            if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim() && isActiveRequest()) {
+              sessionId.value = json.session_id;
+            }
+            break;
+          case 'done':
+            // 保存会话ID并在所有数据接收完成后跳转
+            if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim() && isActiveRequest()) {
+              sessionId.value = json.session_id;
+              // 如果发送时没有sessionId参数，跳转到带sessionId的路由
+              if (shouldRouteToNewSession) {
+                router.push(`/aichat/${json.session_id}`);
+              }
+            }
+            break;
+          case 'error':
+            throw new Error(json.content || 'API错误');
         }
       }
     }
@@ -361,7 +399,8 @@ const fetchAIResponse = async (userMessage) => {
 
   // 如果没有收到任何内容
   if (!aiResponse) {
-    messages.value[messages.value.length - 1].content = '抱歉，我无法生成回复。请检查API设置或稍后再试。';
+    hideAssistantProgress(assistantMessage);
+    assistantMessage.content = '抱歉，我无法生成回复。请检查API设置或稍后再试。';
   }
   } catch (error) {
     console.error('Fetch error:', error);
@@ -853,29 +892,48 @@ const loadSessionHistory = (session) => {
   padding: 0 18px;
 }
 
-.typing-indicator {
+.retrieval-progress {
   display: flex;
-  align-items: center;
-  min-height: 26px;
-  padding: 3px;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 30px;
+  color: #1e293b;
 }
 
-.typing-indicator span {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin: 0 3px;
-  border-radius: 50%;
+.retrieval-progress__pulse {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-top: 9px;
+  border-radius: 999px;
   background: #2563eb;
-  animation: bounce 1.5s infinite ease-in-out;
+  box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.12);
+  animation: progressPulse 1.35s infinite ease-in-out;
 }
 
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.2s;
+.retrieval-progress__copy {
+  display: grid;
+  gap: 3px;
 }
 
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.4s;
+.retrieval-progress__copy strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1.5;
+}
+
+.retrieval-progress__copy small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.empty-assistant-message {
+  color: #64748b;
+  font-size: 14px;
+  font-style: italic;
 }
 
 .evidence-panel {
@@ -944,12 +1002,14 @@ const loadSessionHistory = (session) => {
   gap: 8px;
 }
 
-@keyframes bounce {
-  0%, 60%, 100% {
-    transform: translateY(0);
+@keyframes progressPulse {
+  0%, 100% {
+    opacity: 0.62;
+    transform: scale(0.92);
   }
-  30% {
-    transform: translateY(-6px);
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
   }
 }
 

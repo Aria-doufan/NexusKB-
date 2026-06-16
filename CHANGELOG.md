@@ -4,6 +4,7 @@
 
 ## 2026-06-15 - v0.3.0
 
+- Added in-bubble retrieval progress states for AI chat responses, backed by SSE event mapping and frontend fallback text.
 - 新增 Elasticsearch enterprise retrieval backend，并将其定位为企业检索默认后端，Chroma 保留为 baseline。
 - 新增 `doc_semantic_type` 元数据贯通，覆盖 chunk 准备、索引、检索、评估和 RAG context。
 - 新增 whitelist-driven metadata filter planner，支持 source/doc semantic type 的 hard/soft filter 决策。
