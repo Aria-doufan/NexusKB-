@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = BASE_DIR / '.env'
-load_dotenv(ENV_FILE, override=True)
+load_dotenv(ENV_FILE, override=False)
 
 
 # Quick-start development settings - unsuitable for production
@@ -119,7 +119,7 @@ DATABASES = {
 
 # Celery 配置
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
-REDIS_PORT = os.getenv('REDIS_PORT', '6379')
+REDIS_PORT = os.getenv('REDIS_PORT', '6479')
 REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '')
 REDIS_AUTH = f':{REDIS_PASSWORD}@' if REDIS_PASSWORD else ''
 CELERY_BROKER_URL = f'redis://{REDIS_AUTH}{REDIS_HOST}:{REDIS_PORT}/1'

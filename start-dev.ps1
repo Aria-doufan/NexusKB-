@@ -2,7 +2,8 @@ param(
     [switch]$Migrate,
     [switch]$SkipElasticsearch,
     [string]$CondaEnv = "nexuskb",
-    [string]$RedisServerPath = "D:\Tools\Redis-7.4.8-Windows-x64-msys2\redis-server.exe"
+    [string]$RedisServerPath = "D:\Tools\Redis-7.4.8-Windows-x64-msys2\redis-server.exe",
+    [int]$RedisPort = 6479
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,6 +78,7 @@ function New-ServiceCommand {
     param(
         [string]$WorkingDirectory,
         [string[]]$Commands,
+        [hashtable]$Environment = @{},
         [switch]$UseVenv
     )
 
@@ -84,6 +86,10 @@ function New-ServiceCommand {
         "Set-Location -LiteralPath $(Convert-ToSingleQuotedPowerShellString $WorkingDirectory)",
         "`$env:PYTHONUTF8 = '1'"
     )
+
+    foreach ($key in $Environment.Keys) {
+        $parts += '$env:' + $key + ' = ' + (Convert-ToSingleQuotedPowerShellString ([string]$Environment[$key]))
+    }
 
     if ($UseVenv -and [string]::IsNullOrWhiteSpace($CondaEnv) -and (Test-Path -LiteralPath $VenvActivate)) {
         $parts += ". $(Convert-ToSingleQuotedPowerShellString $VenvActivate)"
@@ -183,8 +189,8 @@ function Start-ElasticsearchIfNeeded {
 }
 
 function Start-RedisIfNeeded {
-    if (Test-PortListening 6379) {
-        Write-Host "Redis is already listening on port 6379." -ForegroundColor Green
+    if (Test-PortListening $RedisPort) {
+        Write-Host "Redis is already listening on port $RedisPort." -ForegroundColor Green
         return
     }
 
@@ -195,14 +201,14 @@ function Start-RedisIfNeeded {
         throw "Redis server not found. Install Redis, add redis-server to PATH, or pass -RedisServerPath '<path-to-redis-server.exe>'."
     }
 
-    Write-Host "Starting Redis on port 6379..." -ForegroundColor Cyan
-    Start-ServiceWindow -Title "NexusKB Redis :6379" -Command "& $(Convert-ToSingleQuotedPowerShellString $redisPath)"
+    Write-Host "Starting Redis on port $RedisPort..." -ForegroundColor Cyan
+    Start-ServiceWindow -Title "NexusKB Redis :$RedisPort" -Command "& $(Convert-ToSingleQuotedPowerShellString $redisPath) --port $RedisPort"
 
-    if (-not (Wait-PortListening -Port 6379 -TimeoutSeconds 10)) {
-        throw "Redis did not start listening on port 6379 within 10 seconds. Check the Redis window for errors."
+    if (-not (Wait-PortListening -Port $RedisPort -TimeoutSeconds 10)) {
+        throw "Redis did not start listening on port $RedisPort within 10 seconds. Check the Redis window for errors."
     }
 
-    Write-Host "Redis is listening on port 6379." -ForegroundColor Green
+    Write-Host "Redis is listening on port $RedisPort." -ForegroundColor Green
 }
 
 function Test-EnvFile {
@@ -282,8 +288,9 @@ if ($Migrate) {
 }
 $djangoCommands += New-PythonCommand "python manage.py runserver 8001"
 
-$djangoCommand = New-ServiceCommand -WorkingDirectory $DjangoDir -Commands $djangoCommands -UseVenv
-$backendCommand = New-ServiceCommand -WorkingDirectory $BackendDir -Commands @(New-PythonCommand "uvicorn main:app --reload") -UseVenv
+$serviceEnvironment = @{ REDIS_PORT = $RedisPort }
+$djangoCommand = New-ServiceCommand -WorkingDirectory $DjangoDir -Commands $djangoCommands -Environment $serviceEnvironment -UseVenv
+$backendCommand = New-ServiceCommand -WorkingDirectory $BackendDir -Commands @(New-PythonCommand "uvicorn main:app --reload") -Environment $serviceEnvironment -UseVenv
 $frontendCommand = New-ServiceCommand -WorkingDirectory $FrontendDir -Commands @("npm run dev")
 
 Start-ServiceWindow -Title "NexusKB Django :8001" -Command $djangoCommand
