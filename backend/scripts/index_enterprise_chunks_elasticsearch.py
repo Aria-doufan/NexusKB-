@@ -12,7 +12,7 @@ from langchain_ollama import OllamaEmbeddings
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CHILD_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "child_chunks_parent_child.jsonl"
 DEFAULT_PARENT_CHUNKS_PATH = BACKEND_DIR / "data" / "enterprise_rag_bench" / "parent_chunks_parent_child.jsonl"
-DEFAULT_URL = "http://localhost:9200"
+DEFAULT_URL = "http://localhost:9298"
 DEFAULT_INDEX_NAME = "nexuskb_enterprise_chunks"
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"

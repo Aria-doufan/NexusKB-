@@ -7,7 +7,7 @@ services:
       - xpack.security.enabled=false
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9298:9200"
     volumes:
       - nexuskb-elasticsearch-data:/usr/share/elasticsearch/data
     healthcheck:

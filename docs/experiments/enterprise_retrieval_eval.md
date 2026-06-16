@@ -4,13 +4,14 @@
 
 本文档用于集中记录 EnterpriseRAG-Bench 检索实验数据，方便对比不同召回与重排方案的效果。
 
-当前优先比较三组方案：
+当前集中记录 EnterpriseRAG-Bench 检索实验，覆盖：
 
 1. Chroma only
 2. Chroma + BM25 混合召回
 3. Chroma + BM25 混合召回 + Reranker
+4. Elasticsearch enterprise retrieval backend
 
-评测目标不是最终验收，而是先建立可复用的检索能力仪表盘，用数据指导后续 `rag_intent` 策略、`source_hints` 软加权和 reranker 接入方式。
+评测目标不是最终验收，而是建立可复用的检索能力仪表盘。后续每次做检索相关实验，都优先追加到本文档，确保 `rag_intent` 策略、`source_hints` 软加权、reranker、Elasticsearch backend 和 metadata filter 的效果可追踪。
 
 ## 固定评测配置
 
@@ -37,6 +38,13 @@
 | `average_latency_ms` | 单问题平均检索耗时 |
 | `elapsed_sec` | 整轮评测总耗时 |
 
+### 评测口径说明
+
+- 主检索指标以后优先看 `evidence_retrieval_summary`，只统计 `expected_doc_ids` 非空的问题。
+- `high_level` 没有单一 gold document，主要测试全局综合能力，不纳入 expected-doc recall 主口径。
+- `info_not_found` 没有 gold document，主要测试拒答和防幻觉能力，不纳入 expected-doc recall 主口径。
+- 顶层 `hit@K`、`recall@K`、`mrr@K` 保留为全量 500 题兼容视图，但解释时必须注明它包含 30 道无 gold doc 问题。
+
 ## 实验总表
 
 | 实验 ID | 方案 | 状态 | 问题数 | hit@1 | hit@5 | hit@10 | hit@20 | recall@1 | recall@5 | recall@10 | recall@20 | mrr@20 | 平均延迟 ms | 总耗时 s | 输出文件 |
@@ -44,6 +52,7 @@
 | exp-001 | Chroma only child vector search | 已完成 | 500 | 0.614 | 0.760 | 0.794 | 0.814 | 0.5165 | 0.7155 | 0.7627 | 0.7858 | 0.6744 | 129.23 | 64.67 | `backend/data/enterprise_rag_bench/eval/baseline_chroma_child_summary.json` |
 | exp-002 | Chroma + BM25 hybrid retrieval | 已完成 | 500 | 0.640 | 0.814 | 0.886 | 0.900 | 0.5364 | 0.7775 | 0.8658 | 0.8868 | 0.7190 | 370.40 | 185.26 | `backend/data/enterprise_rag_bench/eval/hybrid_bm25_rrf_summary.json` |
 | exp-003 | Chroma + BM25 hybrid retrieval + reranker | 已完成 | 500 | 0.734 | 0.840 | 0.882 | 0.900 | 0.6227 | 0.8029 | 0.8645 | 0.8868 | 0.7846 | 1149.55 | 574.89 | `backend/data/enterprise_rag_bench/eval/hybrid_bm25_rrf_reranker_summary.json` |
+| exp-004 | Elasticsearch hybrid retrieval + source boost | 已完成 | 500 | 0.864 | 0.930 | 0.934 | 0.934 | 0.7476 | 0.9022 | 0.9242 | 0.9260 | 0.8928 | 376.60 | 188.49 | `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/retrieval_summary.json` |
 
 ## 实验明细
 
@@ -232,23 +241,135 @@ backend\.venv\Scripts\python.exe backend\scripts\evaluate_enterprise_hybrid_retr
 - 平均延迟从 exp-002 的 370.40ms 增至 1149.55ms；如果服务化时 BM25 索引常驻内存，实际线上延迟会低于脚本端到端统计，但 reranker 仍应作为策略开关而不是无条件默认。
 - 当前脚本 `backend/scripts/evaluate_enterprise_hybrid_retrieval.py` 已改为 Qwen3 官方 yes/no logit 评分方式，避免 `CrossEncoder` 分类头缺失造成错误结果。
 
+### exp-004: Elasticsearch hybrid retrieval + source boost
+
+状态：已完成
+
+计划目标：
+
+- 用当前 Elasticsearch enterprise retrieval backend 跑同一套 EnterpriseRAG-Bench 500 题检索评测。
+- 验证 ES backend 在召回、TopK 命中、排序质量和延迟上是否超过 Chroma hybrid/reranker 基线。
+- 将结果作为后续 ES retrieval、metadata filter、source boost 和 reranker 策略实验的对比基线。
+
+运行命令：
+
+```powershell
+conda run -n NexusKB python backend/scripts/evaluate_enterprise_hybrid_retrieval.py --backend elasticsearch --method chroma_bm25_rrf_source_boost --standard-output
+```
+
+核心配置：
+
+| 参数 | 值 |
+| --- | --- |
+| backend | `elasticsearch` |
+| method | `chroma_bm25_rrf_source_boost` |
+| questions | 500 |
+| dataset | `backend/data/enterprise_rag_bench/questions.jsonl` |
+| ES index | `nexuskb_enterprise_chunks` |
+| indexed chunks at run time | 10842 |
+| embedding_model | `qwen3-embedding:latest` |
+| dense_top_k | 50 |
+| bm25_top_k | 50 |
+| rrf_k | 60 |
+| source_boost | 0.15 |
+| metadata_filter | `none` |
+| reranker | disabled |
+| git commit recorded by run | `e355d84` |
+
+结果摘要：
+
+| 指标 | 值 |
+| --- | ---: |
+| questions | 500 |
+| hit@1 | 0.864 |
+| hit@5 | 0.930 |
+| hit@10 | 0.934 |
+| hit@20 | 0.934 |
+| recall@1 | 0.7476 |
+| recall@5 | 0.9022 |
+| recall@10 | 0.9242 |
+| recall@20 | 0.9260 |
+| precision@20 | 0.0707 |
+| ndcg@20 | 0.8935 |
+| map@20 | 0.8747 |
+| mrr@20 | 0.8928 |
+| average_latency_ms | 376.60 |
+| elapsed_sec | 188.49 |
+| failures | 49 |
+
+主检索口径（`expected_doc_ids` 非空）：
+
+| 指标 | 值 |
+| --- | ---: |
+| questions | 470 |
+| excluded_questions_without_expected_docs | 30 |
+| hit@20 | 0.9936 |
+| recall@20 | 0.9851 |
+| mrr@20 | 0.9498 |
+| average_latency_ms | 377.29 |
+
+非检索题统计：
+
+| question_type | questions | 评估口径 |
+| --- | ---: | --- |
+| high_level | 10 | 全局综合 / answer completeness |
+| info_not_found | 20 | 拒答准确率 / hallucination rate |
+
+输出文件：
+
+- `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/config.json`
+- `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/retrieval_summary.json`
+- `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/retrieval_details.jsonl`
+- `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/retrieval_failures.jsonl`
+- `backend/data/eval_outputs/20260616-074936-197247-retrieval-e355d84/report.md`
+
+按问题类型摘要：
+
+| question_type | questions | hit@20 | recall@20 | mrr@20 | 平均延迟 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| basic | 175 | 1.0000 | 1.0000 | 0.9662 | 384.48 |
+| semantic | 125 | 0.9760 | 0.9760 | 0.8824 | 371.67 |
+| intra_document_reasoning | 40 | 1.0000 | 1.0000 | 0.9667 | 375.68 |
+| project_related | 40 | 1.0000 | 0.9625 | 1.0000 | 381.80 |
+| constrained | 30 | 1.0000 | 1.0000 | 1.0000 | 387.00 |
+| conflicting_info | 20 | 1.0000 | 1.0000 | 1.0000 | 361.71 |
+| completeness | 20 | 1.0000 | 0.8754 | 0.9167 | 360.74 |
+| miscellaneous | 20 | 1.0000 | 1.0000 | 1.0000 | 361.36 |
+| high_level | 10 | 0.0000 | 0.0000 | 0.0000 | 349.05 |
+| info_not_found | 20 | 0.0000 | 0.0000 | 0.0000 | 374.15 |
+
+按 `doc_semantic_type` 摘要：
+
+| doc_semantic_type | questions | hit@20 | recall@20 | mrr@20 | 平均延迟 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| generic_doc | 470 | 0.9936 | 0.9851 | 0.9498 | 377.29 |
+
+结论：
+
+- ES backend 在同一 500 题集上显著超过此前 Chroma hybrid/reranker 最佳结果：`recall@20` 从 exp-003 的 0.8868 提升到 0.9260，`hit@20` 从 0.900 提升到 0.934，`mrr@20` 从 0.7846 提升到 0.8928。
+- ES 当前未启用本地 reranker，平均延迟 376.60ms，低于 exp-003 的 1149.55ms；与 exp-002 的 370.40ms 接近。
+- 主检索口径排除 30 道 `expected_doc_ids` 为空的问题后，`evidence_retrieval_summary` 的 `recall@20=0.9851`、`hit@20=0.9936`、`mrr@20=0.9498`，说明 ES 对标准证据型问题的候选覆盖已经很强。
+- 当前剩余问题主要不是普通 evidence recall，而是 `high_level`/`info_not_found` 的评估口径、无答案处理，以及 `completeness` 类型的多证据覆盖。
+
 ## 横向对比结论
 
-当前已完成 exp-001、exp-002、exp-003。
+当前已完成 exp-001、exp-002、exp-003、exp-004。
 
 阶段性结论：
 
-- BM25 + RRF 混合召回值得进入下一阶段，因为它对 `hit@20`、`recall@20`、`mrr@20` 都有明确提升。
-- Reranker 值得保留为策略能力，因为它把 `hit@1` 从 exp-002 的 0.640 提升到 0.734，把 `mrr@20` 从 0.7190 提升到 0.7846。
-- Reranker 不提升 `hit@20` 和 `recall@20`，所以它不能替代混合召回，只适合做排序增强。
-- 当前工程取舍是延迟：GPU 上 rerank 20 个候选后平均检索耗时约 1.15 秒，应按 `rag_intent` 或复杂查询开关启用。
+- BM25 + RRF 混合召回仍是召回增强的关键基础，因为 exp-002 相比 Chroma-only 明显提升 `hit@20`、`recall@20` 和 `mrr@20`。
+- Reranker 适合做排序增强，但不新增候选；exp-003 提升了 `hit@1` 和 `mrr@20`，同时带来约 1.15 秒平均延迟。
+- Elasticsearch enterprise retrieval backend 是当前最佳检索基线：exp-004 全量 500 题兼容视图达到 `recall@20=0.9260`、`hit@20=0.934`、`mrr@20=0.8928`，平均延迟 376.60ms。
+- 主检索口径应优先看 `evidence_retrieval_summary`：470 道标准证据型问题达到 `recall@20=0.9851`、`hit@20=0.9936`、`mrr@20=0.9498`，说明普通 evidence recall 已接近饱和。
+- 后续优化重点应从“单纯提高 Top20 召回”转向：无答案/高层问题的评估口径、multi-evidence completeness 覆盖、Top context packing，以及是否对少量复杂问题再叠加 reranker。
 
 后续对比时优先看：
 
-1. Reranker 造成 `hit@10` 轻微下降的失败样例。
-2. 是否将 `reranker_candidate_k` 从 20 调到 10 或按 `rag_intent` 动态控制。
-3. 失败案例是否集中在特定 `source_type` 或 `question_type`。
-4. `source_hints` 软加权是否能进一步提升混合召回的候选质量。
+1. 以 exp-004 作为新的 ES 检索基线，后续 retrieval 实验继续追加到本文档。
+2. 单独分析 `high_level` 和 `info_not_found` 是否应排除在普通 expected-doc recall 外，或设计独立的拒答/无答案指标。
+3. 分析 `completeness` 类型的多证据覆盖损失，重点看 `recall@20=0.8754` 的样例。
+4. 在 ES backend 上验证 reranker 是否还能提升 `hit@1`/`mrr@20`，并记录延迟成本。
+5. 继续评估 metadata hard/soft filter 与 source boost 对 ES 检索的影响。
 
 ## 失败样例记录模板
 
@@ -258,7 +379,8 @@ backend\.venv\Scripts\python.exe backend\scripts\evaluate_enterprise_hybrid_retr
 
 ## 后续执行顺序
 
-1. 对 exp-002 和 exp-003 的失败样例做差异分析。
-2. 设计 `rag_intent` 策略矩阵：简单问题默认 BM25+Chroma，复杂/精确问题再启用 reranker。
-3. 验证 `reranker_candidate_k=10` 和 `reranker_candidate_k=20` 的效果/延迟差异。
-4. 评估 `source_hints` 软加权或 source-aware retrieval。
+1. 对 exp-004 的 49 个失败样例做问题类型和 source_type 分布分析。
+2. 为 `high_level` 和 `info_not_found` 设计独立评估口径，避免把无答案/高层问题混入普通 evidence recall。
+3. 针对 `completeness` 类型分析 required evidence groups 覆盖情况，判断是否需要增加候选、多查询或 evidence packing 策略。
+4. 在 ES backend 上评估 reranker 开关，比较 `hit@1`、`mrr@20` 和延迟成本。
+5. 评估 metadata hard/soft filter、source boost 和 `rag_intent` 策略矩阵在 ES backend 上的增益。

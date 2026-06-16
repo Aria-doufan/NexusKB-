@@ -4,7 +4,7 @@ reranker_model_name: qwen3.5:0.8b
 retrieval_backend: chroma
 
 elasticsearch:
-  url: http://localhost:9200
+  url: http://localhost:9298
   index_name: nexuskb_enterprise_chunks
   username:
   password:

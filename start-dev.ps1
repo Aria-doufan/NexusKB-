@@ -164,8 +164,8 @@ function Start-ElasticsearchIfNeeded {
         return
     }
 
-    if (Test-PortListening 9200) {
-        Write-Host "Elasticsearch is already listening on port 9200." -ForegroundColor Green
+    if (Test-PortListening 9298) {
+        Write-Host "Elasticsearch is already listening on port 9298." -ForegroundColor Green
         return
     }
 
@@ -181,11 +181,11 @@ function Start-ElasticsearchIfNeeded {
         throw "Failed to start Elasticsearch with Docker Compose. Check Docker Desktop and docker-compose.elasticsearch.yml, or rerun with -SkipElasticsearch."
     }
 
-    if (-not (Wait-PortListening -Port 9200 -TimeoutSeconds 60)) {
-        throw "Elasticsearch did not start listening on port 9200 within 60 seconds. Check 'docker compose -f docker-compose.elasticsearch.yml logs elasticsearch'."
+    if (-not (Wait-PortListening -Port 9298 -TimeoutSeconds 60)) {
+        throw "Elasticsearch did not start listening on port 9298 within 60 seconds. Check 'docker compose -f docker-compose.elasticsearch.yml logs elasticsearch'."
     }
 
-    Write-Host "Elasticsearch is listening on port 9200." -ForegroundColor Green
+    Write-Host "Elasticsearch is listening on port 9298." -ForegroundColor Green
 }
 
 function Start-RedisIfNeeded {
@@ -265,7 +265,7 @@ function Test-ProjectPreflight {
 
     Assert-PortAvailable -Port 8000 -ServiceName "FastAPI"
     Assert-PortAvailable -Port 8001 -ServiceName "Django"
-    Assert-PortAvailable -Port 3000 -ServiceName "Frontend"
+    Assert-PortAvailable -Port 5173 -ServiceName "Frontend"
 }
 
 $Script:LibMagicDir = $null
@@ -295,8 +295,8 @@ $frontendCommand = New-ServiceCommand -WorkingDirectory $FrontendDir -Commands @
 
 Start-ServiceWindow -Title "NexusKB Django :8001" -Command $djangoCommand
 Start-ServiceWindow -Title "NexusKB FastAPI :8000" -Command $backendCommand
-Start-ServiceWindow -Title "NexusKB Frontend :3000" -Command $frontendCommand
+Start-ServiceWindow -Title "NexusKB Frontend :5173" -Command $frontendCommand
 
 Write-Host "Started development services in separate PowerShell windows." -ForegroundColor Green
-Write-Host "Frontend: http://127.0.0.1:3000" -ForegroundColor Green
+Write-Host "Frontend: http://127.0.0.1:5173" -ForegroundColor Green
 Write-Host "FastAPI docs: http://127.0.0.1:8000/docs" -ForegroundColor Green

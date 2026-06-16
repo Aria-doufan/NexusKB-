@@ -2,8 +2,16 @@
 
 记录 NexusKB 每次有意义的项目改动。每次完成代码、文档、评估或发布相关变更时，都要同步追加一条简短记录。
 
+## 2026-06-16 - Unreleased
+
+- Added `docs/project_guide/langgraph_state_diagram.md` with the current Agentic RAG LangGraph state diagram and interview explanation notes.
+- Recorded the full Elasticsearch retrieval evaluation in `docs/experiments/enterprise_retrieval_eval.md`, including recall/hit/MRR metrics, question-type breakdowns, conclusions, and run artifact paths.
+- Split retrieval evaluation reporting into an evidence-only primary summary and a non-retrieval question summary for `high_level` and `info_not_found` EnterpriseRAG-Bench questions.
+
 ## 2026-06-15 - v0.3.0
 
+- Updated local frontend dev server to port `5173`, avoiding Windows reserved port conflicts on `3000`.
+- Updated local Elasticsearch startup to bind `127.0.0.1:9298`, avoiding Windows reserved port conflicts on `9200` while keeping container port `9200`.
 - Updated local Redis startup to default to port `6479`, avoiding Windows reserved port conflicts while passing the port through to Django and FastAPI.
 - Added in-bubble retrieval progress states for AI chat responses, backed by SSE event mapping and frontend fallback text.
 - Updated `start-dev.ps1` to start the existing Elasticsearch Docker Compose service by default, with `-SkipElasticsearch` for lightweight local runs.

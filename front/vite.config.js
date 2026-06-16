@@ -5,7 +5,7 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
-    port: 3000,
+    port: 5173,
     host: true, // 允许局域网访问
     proxy: {
       // AI相关接口代理到8000端口

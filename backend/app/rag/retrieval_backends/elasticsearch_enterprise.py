@@ -33,7 +33,7 @@ class ElasticsearchEnterpriseRetrievalBackend:
         from elasticsearch import Elasticsearch
 
         es_config = config.get("elasticsearch", {}) or {}
-        url = es_config.get("url") or "http://localhost:9200"
+        url = es_config.get("url") or "http://localhost:9298"
         index_name = es_config.get("index_name") or "nexuskb_enterprise_chunks"
         username = es_config.get("username")
         password = es_config.get("password")

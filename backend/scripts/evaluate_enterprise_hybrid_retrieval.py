@@ -37,7 +37,9 @@ from langchain_ollama import OllamaEmbeddings
 
 from scripts.rag_eval_metrics import (
     average_precision_at_k,
+    build_evidence_retrieval_summary,
     build_group_summary,
+    build_non_retrieval_question_summary,
     build_question_type_summary,
     ndcg_at_k,
     precision_at_k,
@@ -1207,6 +1209,8 @@ def summarize(details: list[dict[str, Any]], k_values: list[int]) -> dict[str, A
     )
     summary["question_type_summary"] = build_question_type_summary(details, k_values)
     summary["doc_semantic_type_summary"] = build_doc_semantic_type_summary(details, k_values)
+    summary["evidence_retrieval_summary"] = build_evidence_retrieval_summary(details, k_values)
+    summary["non_retrieval_question_summary"] = build_non_retrieval_question_summary(details)
     return summary
 
 

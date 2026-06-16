@@ -147,3 +147,67 @@ def build_question_type_summary(
 ) -> dict[str, dict[str, float | int]]:
     """Average retrieval metrics grouped by question_type."""
     return build_group_summary(details, k_values, "question_type")
+
+
+def _has_expected_documents(row: dict[str, Any]) -> bool:
+    return bool(row.get("expected_doc_ids") or [])
+
+
+def build_metric_summary(details: Iterable[dict[str, Any]], k_values: Iterable[int]) -> dict[str, Any]:
+    rows = list(details)
+    k_list = list(k_values)
+    total = len(rows)
+    evidence_coverage_rows = [
+        row for row in rows if row.get("required_evidence_groups_count", 0) > 0
+    ]
+    evidence_coverage_questions = len(evidence_coverage_rows)
+    summary: dict[str, Any] = {
+        "questions": total,
+        "k_values": k_list,
+        "average_latency_ms": round(average_numeric(rows, "latency_ms"), 2),
+        "evidence_coverage": round(
+            average_numeric(evidence_coverage_rows, "evidence_coverage"),
+            4,
+        ),
+        "evidence_coverage_questions": evidence_coverage_questions,
+    }
+
+    for k in k_list:
+        for metric in ("hit", "precision", "recall", "f1", "ndcg", "ap"):
+            field = f"{metric}@{k}"
+            output_field = f"map@{k}" if metric == "ap" else field
+            summary[output_field] = round(average_numeric(rows, field), 4)
+        summary[f"evidence_coverage@{k}"] = round(
+            average_numeric(evidence_coverage_rows, f"evidence_coverage@{k}"),
+            4,
+        )
+
+    if k_list:
+        max_k = max(k_list)
+        summary[f"mrr@{max_k}"] = round(average_numeric(rows, f"rr@{max_k}"), 4)
+
+    return summary
+
+
+def build_evidence_retrieval_summary(
+    details: Iterable[dict[str, Any]],
+    k_values: Iterable[int],
+) -> dict[str, Any]:
+    rows = list(details)
+    evidence_rows = [row for row in rows if _has_expected_documents(row)]
+    summary = build_metric_summary(evidence_rows, k_values)
+    summary["excluded_questions_without_expected_docs"] = len(rows) - len(evidence_rows)
+    return summary
+
+
+def build_non_retrieval_question_summary(details: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in details:
+        if _has_expected_documents(row):
+            continue
+        question_type = str(row.get("question_type") or "unknown")
+        counts[question_type] += 1
+    return {
+        "questions": sum(counts.values()),
+        "question_type_counts": dict(sorted(counts.items())),
+    }
