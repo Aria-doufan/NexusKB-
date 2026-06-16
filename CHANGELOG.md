@@ -5,6 +5,7 @@
 ## 2026-06-15 - v0.3.0
 
 - Updated local Redis startup to default to port `6479`, avoiding Windows reserved port conflicts while passing the port through to Django and FastAPI.
+- Added in-bubble retrieval progress states for AI chat responses, backed by SSE event mapping and frontend fallback text.
 - Updated `start-dev.ps1` to start the existing Elasticsearch Docker Compose service by default, with `-SkipElasticsearch` for lightweight local runs.
 - 新增 Elasticsearch enterprise retrieval backend，并将其定位为企业检索默认后端，Chroma 保留为 baseline。
 - 新增 `doc_semantic_type` 元数据贯通，覆盖 chunk 准备、索引、检索、评估和 RAG context。

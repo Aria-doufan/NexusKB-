@@ -670,6 +670,8 @@ class RagEvidenceWorkflow:
         message: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
+        event_data = data or {}
+        resolved_message = message if message is not None else self._default_event_message(event, event_data)
         state.sse_events.append(
             {
                 "type": event,
@@ -678,11 +680,26 @@ class RagEvidenceWorkflow:
                 "debug_id": state.debug_id,
                 "session_id": state.session_id,
                 "stage": stage,
-                "message": message,
-                "data": data or {},
+                "message": resolved_message,
+                "data": event_data,
                 "timestamp": self._now(),
             }
         )
+
+    @staticmethod
+    def _default_event_message(event: str, data: dict[str, Any]) -> str | None:
+        if event == "retrieval_started":
+            return "正在检索知识库……"
+        if event == "evaluation_finished":
+            return "正在评估证据质量……"
+        if event == "answer_started":
+            return "正在生成答案……"
+        if event == "retrieval_finished":
+            selected_documents = data.get("selected_documents")
+            if selected_documents is not None:
+                return f"已找到 {selected_documents} 篇相关文档"
+            return "检索完成，正在整理证据"
+        return None
 
     @staticmethod
     def _task_type_for_intent(rag_intent: str, query: str) -> str:
