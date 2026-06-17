@@ -4,6 +4,8 @@
 
 ## 2026-06-16 - Unreleased
 
+- Added `docs/superpowers/specs/2026-06-17-pdf-import-design.md` to define the planned backend PDF import enhancement with `pdfplumber`, a 20-page limit, page metadata, and upload failure handling.
+- Implemented backend PDF import hardening with `pdfplumber` extraction, a 20-page limit, page-level metadata, upload filename metadata, upload failure propagation, and temporary-file cleanup tests.
 - Added `docs/project_guide/langgraph_state_diagram.md` with the current Agentic RAG LangGraph state diagram and interview explanation notes.
 - Recorded the full Elasticsearch retrieval evaluation in `docs/experiments/enterprise_retrieval_eval.md`, including recall/hit/MRR metrics, question-type breakdowns, conclusions, and run artifact paths.
 - Split retrieval evaluation reporting into an evidence-only primary summary and a non-retrieval question summary for `high_level` and `info_not_found` EnterpriseRAG-Bench questions.

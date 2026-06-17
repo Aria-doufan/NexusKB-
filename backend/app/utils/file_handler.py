@@ -1,9 +1,25 @@
 import os, hashlib, aiofiles, asyncio
+
+import pdfplumber
 from langchain_core.documents import Document
 
 from app.core.logger_handler import logger
 from app.utils.path_tool import get_abstract_path
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredMarkdownLoader, UnstructuredPowerPointLoader
+from langchain_community.document_loaders import TextLoader, UnstructuredMarkdownLoader, UnstructuredPowerPointLoader
+
+PDF_MAX_PAGES = 20
+
+
+class PdfTextExtractionError(Exception):
+    """Raised when PDF text extraction fails."""
+
+
+class PdfPageLimitError(PdfTextExtractionError):
+    """Raised when a PDF exceeds the configured page limit."""
+
+
+class PdfNoExtractableTextError(PdfTextExtractionError):
+    """Raised when a PDF contains no extractable text."""
 
 async def get_file_md5_hex(file_path: str) -> str:
     """获取文件的md5值"""
@@ -58,17 +74,66 @@ async def listdir_allowed_type(path: str, allowed_types: tuple[str]) -> tuple:
 
 
 
-async def pdf_loader(file_path: str, password: str = None) -> list[Document]:
+def _load_pdf_documents(
+    file_path: str,
+    password: str | None = None,
+    max_pages: int = PDF_MAX_PAGES,
+) -> list[Document]:
+    """Load extractable text from a PDF with pdfplumber."""
+    abs_file_path = get_abstract_path(file_path) if not os.path.isabs(file_path) else file_path
+
+    try:
+        if not os.path.exists(abs_file_path):
+            raise PdfTextExtractionError(f"PDF file not found: {abs_file_path}")
+
+        if not os.path.isfile(abs_file_path):
+            raise PdfTextExtractionError(f"PDF path is not a file: {abs_file_path}")
+
+        if os.path.getsize(abs_file_path) == 0:
+            raise PdfTextExtractionError("PDF content is empty")
+
+        documents: list[Document] = []
+        with pdfplumber.open(abs_file_path, password=password) as pdf:
+            page_count = len(pdf.pages)
+            if page_count > max_pages:
+                raise PdfPageLimitError(f"PDF page count {page_count} exceeds limit {max_pages}")
+
+            for page_number, page in enumerate(pdf.pages, start=1):
+                text = (page.extract_text() or "").strip()
+                if not text:
+                    continue
+
+                documents.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": abs_file_path,
+                            "page": page_number,
+                            "page_count": page_count,
+                            "content_length": len(text),
+                            "file_type": "pdf",
+                        },
+                    )
+                )
+
+        if not documents:
+            raise PdfNoExtractableTextError("PDF contains no extractable text")
+
+        return documents
+    except PdfTextExtractionError:
+        raise
+    except Exception as exc:
+        raise PdfTextExtractionError(f"PDF text extraction failed: {exc}") from exc
+
+
+async def pdf_loader(file_path: str, password: str | None = None) -> list[Document]:
     """
     加载PDF文件内容
     :param file_path: PDF文件路径
     :param password: PDF密码（如果有）
     :return: PDF文件内容
     """
-    # 处理路径，确保使用绝对路径
-    abs_file_path = get_abstract_path(file_path) if not os.path.isabs(file_path) else file_path
-    loader = PyPDFLoader(abs_file_path, password=password)
-    return await asyncio.to_thread(loader.load)
+    return await asyncio.to_thread(_load_pdf_documents, file_path, password)
 
 
 async def txt_loader(file_path: str) -> list[Document]:

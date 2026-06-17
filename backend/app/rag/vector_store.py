@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import aiofiles
 from aiofiles import os as aio_os
+from fastapi import HTTPException
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -19,9 +20,14 @@ from langchain_community.retrievers import BM25Retriever
 from app.utils.config import chroma_config
 from app.utils.factory import embed_model
 from app.utils.file_handler import pdf_loader, txt_loader, listdir_allowed_type, get_file_md5_hex, markdown_loader, \
-    ppt_loader, word_loader
+    ppt_loader, word_loader, PdfTextExtractionError
 from app.core.logger_handler import logger
 from app.utils.path_tool import get_abstract_path
+
+
+class DocumentIngestionInputError(Exception):
+    """Raised when an uploaded document cannot be loaded or split into content."""
+
 
 class VectorStoreService:
     """向量数据库服务"""
@@ -54,11 +60,15 @@ class VectorStoreService:
         
         all_docs = []
         for file_path in file_paths:
-            documents = await self.get_file_document(file_path)
-            if documents:
-                split_docs = await self.spliter.split_documents(documents)
-                all_docs.extend(split_docs)
-        
+            try:
+                documents = await self.get_file_document(file_path)
+                if documents:
+                    split_docs = await self.spliter.split_documents(documents)
+                    all_docs.extend(split_docs)
+            except Exception as e:
+                logger.error(f"【向量数据库】BM25加载本地文件 {file_path} 时出错，已跳过: {e}")
+                continue
+
         # 创建BM25检索器
         if all_docs:
             bm25_retriever = BM25Retriever.from_documents(
@@ -208,100 +218,123 @@ class VectorStoreService:
         else:
             return []
 
+    async def _stage_upload_file(self, file) -> tuple[str, str]:
+        """Stage one uploaded file to a temporary path."""
+        original_filename = getattr(file, "filename", "uploaded_file")
+        suffix = os.path.splitext(original_filename)[1].lower()
+        temp_file = None
+        temp_path = None
+        staging_failed = False
+
+        try:
+            temp_file = await asyncio.to_thread(
+                tempfile.NamedTemporaryFile,
+                delete=False,
+                suffix=suffix,
+            )
+            temp_path = temp_file.name
+            content = await file.read()
+            await asyncio.to_thread(temp_file.write, content)
+            await asyncio.to_thread(temp_file.flush)
+            await asyncio.to_thread(temp_file.close)
+            temp_file = None
+            return temp_path, original_filename
+        except Exception as e:
+            staging_failed = True
+            logger.error(f"【向量数据库】文件 {original_filename} 暂存时出错: {e}")
+            raise
+        finally:
+            if staging_failed:
+                if temp_file is not None:
+                    try:
+                        await asyncio.to_thread(temp_file.close)
+                    except Exception as close_error:
+                        logger.error(f"【向量数据库】关闭临时文件 {temp_path} 时出错: {close_error}")
+                if temp_path:
+                    try:
+                        if await aio_os.path.exists(temp_path):
+                            await aio_os.remove(temp_path)
+                    except Exception as delete_error:
+                        logger.error(f"【向量数据库】删除临时文件 {temp_path} 时出错: {delete_error}")
+
+    async def _process_document_file(
+        self,
+        file_path: str,
+        original_filename: str | None,
+        user_id: str | None,
+        upload_mode: bool,
+    ):
+        display_name = original_filename or file_path
+        try:
+            md5_hex = await get_file_md5_hex(file_path)
+            if await self.check_md5_hex(md5_hex):
+                logger.info(f"【向量数据库】文件 {display_name} 的md5值 {md5_hex} 已存在，跳过")
+                return
+
+            try:
+                document: list[Document] = await self.get_file_document(file_path)
+            except PdfTextExtractionError as e:
+                raise DocumentIngestionInputError(str(e)) from e
+            if not document:
+                raise DocumentIngestionInputError("文件加载内容为空")
+
+            document = await self.spliter.split_documents(document)
+            if not document:
+                raise DocumentIngestionInputError("文件切分内容为空")
+
+            for doc in document:
+                if user_id:
+                    doc.metadata['user_id'] = user_id
+                if original_filename:
+                    doc.metadata['filename'] = original_filename
+
+            await asyncio.to_thread(self.vectors_store.add_documents, document)
+            await self.save_md5_hex(md5_hex)
+            logger.info(f"【向量数据库】文件 {display_name} 的md5值 {md5_hex} 已保存")
+
+        except DocumentIngestionInputError as e:
+            logger.error(f"【向量数据库】文件 {display_name} 处理时出错: {e}")
+            if upload_mode:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"文件 {display_name} 处理失败: {e}",
+                ) from e
+        except Exception as e:
+            logger.error(f"【向量数据库】文件 {display_name} 处理时出错: {e}")
+            if upload_mode:
+                raise
+
     async def get_document(self, files: list = None, user_id: str = None):
         """
         处理文档并将其转为向量存入向量数据库
         :param files: 上传的文件列表，如果为None则从数据文件夹读取
         :param user_id: 用户ID，用于标记文档的所有者
         """
-        # 确定要处理的文件列表
-        file_paths = []
-        if files:
-            # 处理上传的文件
+        upload_mode = files is not None
+
+        if upload_mode:
+            if not files:
+                return
+
             for file in files:
-                # 创建临时文件，使用asyncio.to_thread 包裹
-                temp_file_path = await asyncio.to_thread(
-                    tempfile.NamedTemporaryFile,
-                    delete=False,
-                    suffix=os.path.splitext(file.filename)[1]
-                )
-                content = await file.read()
-                await asyncio.to_thread(temp_file_path.write, content)
-                file_paths.append(temp_file_path.name)
+                file_path = None
+                original_filename = None
+                try:
+                    file_path, original_filename = await self._stage_upload_file(file)
+                    await self._process_document_file(file_path, original_filename, user_id, upload_mode=True)
+                finally:
+                    if file_path and await aio_os.path.exists(file_path):
+                        try:
+                            await aio_os.remove(file_path)
+                        except Exception as delete_error:
+                            logger.error(f"【向量数据库】删除临时文件 {file_path} 时出错: {delete_error}")
         else:
-            # 从数据文件夹读取文件
             allowed_file_path: tuple[str] = await listdir_allowed_type(
                 chroma_config['data_path'],
                 tuple(chroma_config['allow_knowledge_file_types'])
             )
-            file_paths = list(allowed_file_path)
-
-        for file_path in file_paths:
-            # 2. 计算MD5
-            md5_hex = await get_file_md5_hex(file_path)
-            if await self.check_md5_hex(md5_hex):
-                logger.info(f"【向量数据库】文件 {file_path} 的md5值 {md5_hex} 已存在，跳过")
-                # 如果是临时文件，删除
-                if files:
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
-                continue
-
-            try:
-                # 3. 加载文档
-                document: list[Document] = await self.get_file_document(file_path)
-                if not document:
-                    logger.error(f"【向量数据库】文件 {file_path} 加载内容为空，跳过")
-                    # 如果是临时文件，删除
-                    if files:
-                        try:
-                            os.unlink(file_path)
-                        except Exception as e:
-                            pass
-                    continue
-
-                # 4. 切分文档
-                document: list[Document] = await self.spliter.split_documents(document)
-                if not document:
-                    logger.error(f"【向量数据库】文件 {file_path} 切分内容为空，跳过")
-                    # 如果是临时文件，删除
-                    if files:
-                        try:
-                            os.unlink(file_path)
-                        except:
-                            pass
-                    continue
-
-                # 5. 添加用户ID作为元数据
-                if user_id:
-                    for doc in document:
-                        doc.metadata['user_id'] = user_id
-
-                # 6. 异步写入向量库
-                await asyncio.to_thread(self.vectors_store.add_documents, document)
-
-                # 6. 保存MD5
-                await self.save_md5_hex(md5_hex)
-                logger.info(f"【向量数据库】文件 {file_path} 的md5值 {md5_hex} 已保存")
-
-                # 如果是临时文件，删除
-                if files:
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
-
-            except Exception as e:
-                logger.error(f"【向量数据库】文件 {file_path} 处理时出错: {e}")
-                # 如果是临时文件，删除
-                if files:
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
-                continue
+            for file_path in allowed_file_path:
+                await self._process_document_file(file_path, None, user_id, upload_mode=False)
 
 
 if __name__ == '__main__':
